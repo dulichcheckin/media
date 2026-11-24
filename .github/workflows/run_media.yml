@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: "Kênh chạy (all, spotify, castbox, dailymotion, youtube, bluesky, archive)"
+        description: "Kênh chạy (all, spotify, castbox, dailymotion, youtube, bluesky, archive, preview)"
         required: true
         default: "all"
         type: choice
@@ -16,6 +16,7 @@ on:
           - youtube
           - bluesky
           - archive
+          - preview
       article_url:
         description: "URL bài viết trên dulichcheckin.com"
         required: true
