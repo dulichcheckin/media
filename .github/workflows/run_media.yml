@@ -1,10 +1,10 @@
-name: Auto Podcast & Dailymotion Video
+name: Auto Podcast & Video Syndication (6 Media Channels)
 
 on:
   workflow_dispatch:
     inputs:
       channel:
-        description: "Kênh chạy (all, spotify, castbox, dailymotion)"
+        description: "Kênh chạy (all, spotify, castbox, dailymotion, youtube, bluesky, archive)"
         required: true
         default: "all"
         type: choice
@@ -13,6 +13,9 @@ on:
           - spotify
           - castbox
           - dailymotion
+          - youtube
+          - bluesky
+          - archive
       article_url:
         description: "URL bài viết trên dulichcheckin.com"
         required: true
@@ -51,6 +54,10 @@ jobs:
           GEMINI_KEYS: ${{ secrets.GEMINI_KEYS }}
           DM_API_KEY: ${{ secrets.DM_API_KEY }}
           DM_API_SECRET: ${{ secrets.DM_API_SECRET }}
+          ARCHIVE_ACCESS_KEY: ${{ secrets.ARCHIVE_ACCESS_KEY }}
+          ARCHIVE_SECRET_KEY: ${{ secrets.ARCHIVE_SECRET_KEY }}
+          BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
+          BLUESKY_PASSWORD: ${{ secrets.BLUESKY_PASSWORD }}
           INPUT_CHANNEL: ${{ github.event.inputs.channel || github.event.client_payload.channel || 'all' }}
           INPUT_ARTICLE_URL: ${{ github.event.inputs.article_url || github.event.client_payload.article_url }}
           INPUT_H1_TITLE: ${{ github.event.inputs.h1_title || github.event.client_payload.h1_title || '' }}
