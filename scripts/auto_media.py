@@ -306,9 +306,10 @@ def upload_mp3_to_github_release(mp3_path: Path) -> tuple[str, int]:
 
     # 3. Upload asset
     upload_url = f"https://uploads.github.com/repos/{REPO}/releases/{release_id}/assets?name={urllib.parse.quote(asset_name)}"
+    ctype = "video/mp4" if asset_name.lower().endswith(".mp4") else "audio/mpeg"
     up_headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
-        "Content-Type": "audio/mpeg",
+        "Content-Type": ctype,
     }
     mp3_bytes = mp3_path.read_bytes()
     up_res = requests.post(upload_url, headers=up_headers, data=mp3_bytes, timeout=120)
@@ -605,11 +606,22 @@ def main():
             mp4_path = WORK_DIR / f"{slug}-dailymotion.mp4"
             build_hd_video_from_images(article["images"], mp3_path, duration, mp4_path)
             print(f"Built HD MP4: {mp4_path.name} ({mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
-            dm_url = upload_to_dailymotion(mp4_path, ep_title, desc, script_data.get("tags", "du lich viet nam, du lich checkin"), article_url)
-            print(f"Published Dailymotion Video: {dm_url}")
+            # Always upload HD MP4 to GitHub Releases so user can watch/download immediately!
+            mp4_release_url, _ = upload_mp3_to_github_release(mp4_path)
+            print(f"Saved HD MP4 to GitHub Release: {mp4_release_url}")
+            dm_url = ""
+            dm_note = "ok"
+            try:
+                dm_url = upload_to_dailymotion(mp4_path, ep_title, desc, script_data.get("tags", "du lich viet nam, du lich checkin"), article_url)
+                print(f"Published Dailymotion Video: {dm_url}")
+            except Exception as dm_err:
+                dm_note = str(dm_err)
+                print(f"Dailymotion API warning (MP4 still saved!): {dm_note}")
             update_status_json(article_url, "dailymotion", {
                 "title": ep_title,
+                "mp4_url": mp4_release_url,
                 "video_url": dm_url,
+                "dm_status": dm_note,
                 "duration_sec": round(duration, 1),
                 "published_at": now_str,
             })
