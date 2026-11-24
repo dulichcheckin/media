@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:atom="http://www.w3.org/2005/Atom"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Du Lịch Checkin - Trải Nghiệm Việt Nam</title>
+    <link>https://dulichcheckin.com</link>
+    <language>vi</language>
+    <copyright>Du Lịch Checkin</copyright>
+    <atom:link href="https://dulichcheckin.github.io/media/spotify.xml" rel="self" type="application/rss+xml"/>
+    <description>Podcast kể chuyện trải nghiệm thực tế, khám phá điểm đến, văn hóa và ẩm thực khắp ba miền Việt Nam cùng Du Lịch Checkin.</description>
+    <itunes:author>Du Lịch Checkin</itunes:author>
+    <itunes:summary>Podcast kể chuyện trải nghiệm thực tế, khám phá điểm đến, văn hóa và ẩm thực khắp ba miền Việt Nam cùng Du Lịch Checkin.</itunes:summary>
+    <itunes:type>episodic</itunes:type>
+    <itunes:explicit>false</itunes:explicit>
+    <itunes:owner>
+      <itunes:name>Du Lịch Checkin</itunes:name>
+      <itunes:email>contact@dulichcheckin.com</itunes:email>
+    </itunes:owner>
+    <itunes:image href="https://dulichcheckin.github.io/media/cover-spotify.jpg"/>
+    <itunes:category text="Leisure">
+      <itunes:category text="Travel"/>
+    </itunes:category>
+    <item>
+      <title>Khám phá Đền Bạch Mã: Trấn Đông cổ kính của Thăng Long tứ trấn</title>
+      <link>https://dulichcheckin.com/den-bach-ma/</link>
+      <guid isPermaLink="false">spotify-https-dulichcheckin-com-den-bach-ma</guid>
+      <pubDate>Tue, 24 Nov 2026 03:00:34 +0000</pubDate>
+      <description><![CDATA[<p>Đền Bạch Mã tọa lạc tại số 76 phố Hàng Buồm, quận Hoàn Kiếm, là Di tích Quốc gia đặc biệt mang vị trí Trấn Đông trong hệ thống Thăng Long tứ trấn cổ xưa. Ngôi đền có niên đại khởi dựng sớm nhất Hà Nội, thờ chính thần Long Đỗ - Thành hoàng kinh thành Thăng Long. Gắn liền với sự tích ngựa trắng dẫn lối giúp vua Lý Thái Tổ xây thành đứng vững năm 1010, đền Bạch Mã sở hữu chiều sâu lịch sử văn hóa lâu đời qua nhiều triều đại.</p><p>Về kiến trúc, đền được xây dựng theo kiểu chữ Tam khép kín với các công trình tiêu biểu như Nghi môn, nhà Phương đình tám mái, tòa Tiền tế có tượng Ngựa Trắng và khu vực Giếng Ngọc độc đáo. Tập podcast này của Du Lịch Checkin sẽ đưa bạn khám phá từng không gian kiến trúc, nét đẹp văn hóa tâm linh cùng những lưu ý thực tế về giờ mở cửa và giá vé khi ghé thăm ngôi đền linh thiêng phố cổ.</p><p>Xem bài viết hướng dẫn chi tiết tại: <a href="https://dulichcheckin.com/den-bach-ma/">https://dulichcheckin.com/den-bach-ma/</a></p>]]></description>
+      <enclosure url="https://github.com/dulichcheckin/media/releases/download/audio-files/den-bach-ma-su-tich-van-khan-kinh-nghiem-di-le-spotify.mp3" length="1460780" type="audio/mpeg"/>
+      <itunes:title>Khám phá Đền Bạch Mã: Trấn Đông cổ kính của Thăng Long tứ trấn</itunes:title>
+      <itunes:author>Du Lịch Checkin</itunes:author>
+      <itunes:summary>Đền Bạch Mã tọa lạc tại số 76 phố Hàng Buồm, quận Hoàn Kiếm, là Di tích Quốc gia đặc biệt mang vị trí Trấn Đông trong hệ thống Thăng Long tứ trấn cổ xưa. Ngôi đền có niên đại khởi dựng sớm nhất Hà Nội, thờ chính thần Long Đỗ - Thành hoàng kinh thành Thăng Long. Gắn liền với sự tích ngựa trắng dẫn lối giúp vua Lý Thái Tổ xây thành đứng vững năm 1010 Xem chi tiết tại: https://dulichcheckin.com/den-bach-ma/</itunes:summary>
+      <itunes:duration>00:01:31</itunes:duration>
+      <itunes:explicit>false</itunes:explicit>
+    </item>
+  </channel>
+</rss>
