@@ -430,16 +430,15 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
         im.save(p, "JPEG", quality=92)
         dl_imgs.append(p)
 
-    # Render each slide into a smooth Ken Burns clip, then concat with audio
+    # Render each slide into a smooth Ken Burns clip (NO -loop 1 with zoompan -> 10x faster + exact duration header!)
     n = len(dl_imgs)
-    seg_dur = max(4.0, (duration_sec + 1.5) / n)
+    seg_dur = max(3.5, (duration_sec + 0.5) / n)
     fps = 25
-    frames = int(seg_dur * fps)
+    frames = max(25, int(round(seg_dur * fps)))
     clip_paths = []
 
     for i, img_p in enumerate(dl_imgs):
         clip_p = WORK_DIR / f"clip_{i}.mp4"
-        # Alternate gentle zoom-in and zoom-out
         if i % 2 == 0:
             zp = f"zoompan=z='min(zoom+0.0008,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1280x720:fps={fps}"
         else:
@@ -448,9 +447,11 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
         subprocess.run(
             [
                 "ffmpeg", "-y",
-                "-loop", "1", "-i", str(img_p),
+                "-i", str(img_p),
                 "-vf", f"scale=1280:720,{zp},format=yuv420p",
-                "-t", f"{seg_dur:.2f}",
+                "-frames:v", str(frames),
+                "-r", str(fps),
+                "-video_track_timescale", "25000",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                 "-an", str(clip_p),
             ],
@@ -470,7 +471,7 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
             "-i", str(audio_mp3),
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "128k",
-            "-shortest",
+            "-t", f"{duration_sec:.2f}",
             "-movflags", "+faststart",
             str(out_mp4),
         ],
