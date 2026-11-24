@@ -400,60 +400,51 @@ def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: s
 
 
 def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_sec: float, out_mp4: Path):
-    """Build a smooth 1280x720 HD slideshow video with gentle Ken Burns zoom + Aoede voiceover."""
+    """Build a crisp 1280x720 HD slideshow video directly from dulichcheckin.com images + Aoede voiceover."""
     from PIL import Image, ImageOps
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://dulichcheckin.com/",
+    }
     dl_imgs = []
-    for idx, u in enumerate(image_urls[:8]):
+    for idx, u in enumerate(image_urls[:10]):
         try:
-            # Use wsrv.nl to convert webp/any image cleanly to 1280x720 jpg
-            proxy = f"https://wsrv.nl/?url={urllib.parse.quote(u, safe='')}&w=1280&h=720&fit=cover&output=jpg&q=90"
-            r = requests.get(proxy, timeout=25)
-            if r.status_code == 200 and len(r.content) > 8000:
+            r = requests.get(u, headers=headers, timeout=20)
+            if r.status_code == 200 and len(r.content) > 5000:
+                raw_p = WORK_DIR / f"raw_{idx}"
+                raw_p.write_bytes(r.content)
                 p = WORK_DIR / f"slide_{idx}.jpg"
-                p.write_bytes(r.content)
-                # Ensure exact 1280x720 RGB
-                im = Image.open(p).convert("RGB")
+                im = Image.open(raw_p).convert("RGB")
                 im = ImageOps.fit(im, (1280, 720), method=Image.Resampling.LANCZOS)
                 im.save(p, "JPEG", quality=92)
+                raw_p.unlink(missing_ok=True)
                 dl_imgs.append(p)
-        except Exception:
+                print(f"Downloaded real article image #{len(dl_imgs)}: {u}")
+        except Exception as e:
+            print(f"Skip image {u}: {e}")
             continue
-        if len(dl_imgs) >= 6:
+        if len(dl_imgs) >= 7:
             break
 
     if not dl_imgs:
-        # Fallback to cover image
-        ensure_cover_images()
-        p = WORK_DIR / "slide_0.jpg"
-        im = Image.open(ROOT_DIR / "cover-spotify.jpg").convert("RGB")
-        im = ImageOps.fit(im, (1280, 720), method=Image.Resampling.LANCZOS)
-        im.save(p, "JPEG", quality=92)
-        dl_imgs.append(p)
+        raise RuntimeError("Could not download any article images from dulichcheckin.com")
 
-    # Render each slide into a smooth Ken Burns clip (NO -loop 1 with zoompan -> 10x faster + exact duration header!)
+    # Fast, crisp HD slideshow with smooth fade-in per photo (renders in ~5 seconds!)
     n = len(dl_imgs)
-    seg_dur = max(3.5, (duration_sec + 0.5) / n)
-    fps = 25
-    frames = max(25, int(round(seg_dur * fps)))
+    seg_dur = max(3.0, (duration_sec + 0.5) / n)
     clip_paths = []
 
     for i, img_p in enumerate(dl_imgs):
         clip_p = WORK_DIR / f"clip_{i}.mp4"
-        if i % 2 == 0:
-            zp = f"zoompan=z='min(zoom+0.0008,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1280x720:fps={fps}"
-        else:
-            zp = f"zoompan=z='if(lte(zoom,1.0),1.12,max(1.0,zoom-0.0008))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1280x720:fps={fps}"
-
         subprocess.run(
             [
                 "ffmpeg", "-y",
+                "-loop", "1", "-t", f"{seg_dur:.2f}",
                 "-i", str(img_p),
-                "-vf", f"scale=1280:720,{zp},format=yuv420p",
-                "-frames:v", str(frames),
-                "-r", str(fps),
-                "-video_track_timescale", "25000",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-vf", "scale=1280:720,fade=t=in:st=0:d=0.4,format=yuv420p",
+                "-r", "25",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
                 "-an", str(clip_p),
             ],
             check=True,
@@ -470,7 +461,7 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0", "-i", str(concat_txt),
             "-i", str(audio_mp3),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p",
             "-r", "25",
             "-c:a", "aac", "-b:a", "128k",
             "-t", f"{duration_sec:.2f}",
