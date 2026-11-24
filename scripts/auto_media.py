@@ -177,7 +177,7 @@ def compute_image_ahash(im) -> int:
     """Compute 64-bit perceptual average hash (8x8) to detect duplicate/near-duplicate photos across different URLs."""
     from PIL import Image
     small = im.convert("L").resize((8, 8), Image.Resampling.BILINEAR)
-    pixels = list(small.getdata())
+    pixels = list(small.get_flattened_data()) if hasattr(small, "get_flattened_data") else list(small.getdata())
     avg = sum(pixels) / 64.0
     bits = 0
     for px in pixels:
@@ -350,9 +350,11 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
     ]
 
 
-def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
-    # Prioritize Flagship models first, fallback to Lite models only when Flagship models are overloaded
-    models = [
+_LAST_GOOD_GEMINI_MODEL: str | None = None
+
+
+def get_prioritized_gemini_models() -> list[str]:
+    base_models = [
         "gemini-3.8-flash",
         "gemini-3.7-flash",
         "gemini-3.6-flash",
@@ -361,12 +363,20 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
         "gemini-3.5-flash-lite",
         "gemini-flash-lite-latest",
     ]
+    if _LAST_GOOD_GEMINI_MODEL and _LAST_GOOD_GEMINI_MODEL in base_models:
+        return [_LAST_GOOD_GEMINI_MODEL] + [m for m in base_models if m != _LAST_GOOD_GEMINI_MODEL]
+    return base_models
+
+
+def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
+    global _LAST_GOOD_GEMINI_MODEL
     last_err = ""
     for round_try in range(4):
         if round_try > 0:
             wait_sec = 8 * round_try
             print(f"All models busy on round {round_try}, cooling down {wait_sec}s before resuming this step...")
             time.sleep(wait_sec)
+        models = get_prioritized_gemini_models()
         for m_idx, model in enumerate(models):
             key = GEMINI_KEYS[(key_offset + m_idx + round_try) % len(GEMINI_KEYS)]
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
@@ -383,6 +393,7 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
                     txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
                     txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.I).strip()
                     parsed = json.loads(txt)
+                    _LAST_GOOD_GEMINI_MODEL = model
                     if isinstance(parsed, list):
                         if len(parsed) > 0 and isinstance(parsed[0], dict) and ("title" in parsed[0] or "speech_script" in parsed[0] or "scenes" in parsed[0]):
                             return parsed[0]
@@ -399,7 +410,7 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
 
 
 def mix_studio_bgm_into_pcm(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:
-    """Apply warm broadcast vocal boost + mix gentle acoustic pentatonic BGM (1.2s intro, ducked under voice, 1.8s outro)."""
+    """Apply warm broadcast vocal boost + mix clear, warm acoustic pentatonic BGM (+70% boosted BGM: 1.2s intro, ducked under voice, 1.8s outro)."""
     voice_arr = array.array("h")
     voice_arr.frombytes(pcm_bytes)
     v_len = len(voice_arr)
@@ -420,13 +431,13 @@ def mix_studio_bgm_into_pcm(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes
         t = i / float(sample_rate)
         if intro_len <= i < intro_len + v_len:
             v_raw = float(voice_arr[i - intro_len])
-            v_warm = v_raw * 1.15 + prev_v * 0.18
+            v_warm = v_raw * 1.14 + prev_v * 0.16
             prev_v = v_raw
-            duck = 0.58
+            duck = 0.86
         else:
             v_warm = 0.0
             prev_v = 0.0
-            duck = 1.0
+            duck = 1.18
 
         step_idx = int(t // note_dur)
         n_idx = step_idx % len(melody_notes)
@@ -434,14 +445,14 @@ def mix_studio_bgm_into_pcm(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes
         freq = melody_notes[n_idx]
         bfreq = bass_notes[n_idx]
 
-        p_env = min(1.0, n_time / 0.04) * math.exp(-2.0 * n_time)
+        p_env = min(1.0, n_time / 0.04) * math.exp(-1.85 * n_time)
         pluck = (
             math.sin(two_pi * freq * t) * 0.65
             + math.sin(two_pi * (freq * 2.0) * t) * 0.22
             + math.sin(two_pi * (freq * 3.0) * t) * 0.08
         ) * p_env
 
-        pad_env = min(1.0, n_time / 0.25) * math.exp(-0.45 * n_time)
+        pad_env = min(1.0, n_time / 0.22) * math.exp(-0.40 * n_time)
         pad = (
             math.sin(two_pi * bfreq * t) * 0.50
             + math.sin(two_pi * (bfreq * 1.5) * t) * 0.35
@@ -455,7 +466,7 @@ def mix_studio_bgm_into_pcm(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes
         else:
             fade = 1.0
 
-        bgm = (pluck * 3400.0 + pad * 2200.0) * duck * fade
+        bgm = (pluck * 4900.0 + pad * 3300.0) * duck * fade
         val = int(round(v_warm + bgm))
         if val > 32767:
             val = 32767
@@ -464,6 +475,121 @@ def mix_studio_bgm_into_pcm(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes
         out_arr[i] = val
 
     return out_arr.tobytes()
+
+
+def compute_scene_speech_weight(text: str) -> float:
+    """Compute acoustic speaking time weight combining Vietnamese syllable count, character length, and punctuation breath pauses."""
+    s = str(text or "").strip()
+    if not s:
+        return 8.0
+    words = s.split()
+    w_cnt = len(words)
+    char_cnt = len(re.sub(r"\s+", "", s))
+    base_units = w_cnt * 0.65 + (char_cnt / 4.2) * 0.35
+    comma_cnt = len(re.findall(r"[,]", s))
+    dash_colon_cnt = len(re.findall(r"[;:\-–—]", s))
+    period_cnt = max(1, len(re.findall(r"[.!?]", s)))
+    pause_units = comma_cnt * 1.25 + dash_colon_cnt * 1.45 + period_cnt * 1.85
+    return max(5.0, base_units + pause_units)
+
+
+def compute_scene_durations_from_raw_pcm(
+    pcm_bytes: bytes,
+    sample_rate: int,
+    scenes: list[dict] | None,
+    add_intro_sec: float = 0.0,
+    add_outro_sec: float = 0.0,
+) -> list[float]:
+    """Snap every scene boundary directly to the narrator's true breath pause (silence valley) in raw voice PCM before BGM mixing."""
+    if not scenes:
+        return []
+    n_scenes = len(scenes)
+    voice_arr = array.array("h")
+    voice_arr.frombytes(pcm_bytes)
+    total_samples = len(voice_arr)
+    voice_dur = total_samples / float(max(1, sample_rate))
+
+    if n_scenes == 1:
+        d0 = voice_dur + add_intro_sec + add_outro_sec
+        scenes[0]["exact_duration_sec"] = round(d0, 3)
+        return [d0]
+
+    weights = [compute_scene_speech_weight(sc.get("narration", "")) for sc in scenes if isinstance(sc, dict)]
+    if len(weights) != n_scenes:
+        weights = [10.0] * n_scenes
+    total_w = sum(weights) or float(n_scenes)
+
+    # Slice raw voice PCM into 20ms frames and compute smoothed 140ms energy envelope
+    win_samples = max(1, sample_rate // 50)
+    n_frames = total_samples // win_samples
+    if n_frames < n_scenes * 4:
+        durs = [voice_dur * (w / total_w) for w in weights]
+        durs[0] += add_intro_sec
+        durs[-1] += add_outro_sec
+        for sc, d in zip(scenes, durs):
+            if isinstance(sc, dict):
+                sc["exact_duration_sec"] = round(d, 3)
+        return durs
+
+    frame_energies = []
+    for f_i in range(n_frames):
+        st = f_i * win_samples
+        chunk = voice_arr[st : st + win_samples]
+        # Sample every 4th value for instant C-speed mean absolute amplitude
+        sub = chunk[::4]
+        e = sum(abs(v) for v in sub) / float(max(1, len(sub)))
+        frame_energies.append(e)
+
+    # 7-frame (140ms) moving average so true breath pauses (300-600ms silence) become deep valleys
+    smooth_e = []
+    for f_i in range(n_frames):
+        lo = max(0, f_i - 3)
+        hi = min(n_frames, f_i + 4)
+        smooth_e.append(sum(frame_energies[lo:hi]) / float(hi - lo))
+
+    sorted_e = sorted(smooth_e)
+    median_e = max(200.0, sorted_e[len(sorted_e) // 2])
+
+    # Expected cumulative boundaries in seconds
+    cum_w = 0.0
+    boundaries = [0.0]
+    for k in range(n_scenes - 1):
+        cum_w += weights[k]
+        t_exp = voice_dur * (cum_w / total_w)
+        prev_b = boundaries[-1]
+        min_t = max(prev_b + 2.4, t_exp - 2.1)
+        max_t = min(voice_dur - 2.2 * (n_scenes - 1 - k), t_exp + 2.1)
+
+        if max_t <= min_t + 0.15:
+            snapped_t = max(prev_b + 2.0, min(voice_dur - 1.8, t_exp))
+        else:
+            f_lo = max(0, int(min_t * 50))
+            f_hi = min(n_frames - 1, int(max_t * 50))
+            best_f = int(t_exp * 50)
+            best_score = 1e18
+            for f_idx in range(f_lo, f_hi + 1):
+                t_cand = f_idx / 50.0
+                # Strongly prefer near-zero silence valleys while staying near expected punctuation-weighted time
+                dist_penalty = abs(t_cand - t_exp) * (0.22 * median_e)
+                sc_val = smooth_e[f_idx] + dist_penalty
+                if sc_val < best_score:
+                    best_score = sc_val
+                    best_f = f_idx
+            snapped_t = best_f / 50.0
+        boundaries.append(snapped_t)
+
+    boundaries.append(voice_dur)
+    durs = [max(2.2, boundaries[i + 1] - boundaries[i]) for i in range(n_scenes)]
+    # Normalize sum to exact voice_dur before adding intro/outro offsets
+    sum_d = sum(durs) or voice_dur
+    durs = [d * (voice_dur / sum_d) for d in durs]
+    durs[0] += add_intro_sec
+    durs[-1] += add_outro_sec
+
+    for sc, d in zip(scenes, durs):
+        if isinstance(sc, dict):
+            sc["exact_duration_sec"] = round(d, 3)
+    return durs
 
 
 def call_gemini_tts_raw_pcm(speech_script: str, style_direction: str, key_offset: int = 0) -> tuple[bytes, int]:
@@ -536,17 +662,39 @@ def finalize_pcm_to_mp3_with_bgm(pcm_bytes: bytes, sample_rate: int, out_mp3: Pa
     return float(probe)
 
 
-def call_gemini_tts_to_mp3(speech_script: str, style_direction: str, out_mp3: Path, key_offset: int = 0) -> float:
+def call_gemini_tts_to_mp3(
+    speech_script: str,
+    style_direction: str,
+    out_mp3: Path,
+    key_offset: int = 0,
+    scenes: list[dict] | None = None,
+) -> float:
     pcm_bytes, sample_rate = call_gemini_tts_raw_pcm(speech_script, style_direction, key_offset=key_offset)
+    if scenes:
+        compute_scene_durations_from_raw_pcm(pcm_bytes, sample_rate, scenes, add_intro_sec=1.20, add_outro_sec=1.80)
     return finalize_pcm_to_mp3_with_bgm(pcm_bytes, sample_rate, out_mp3)
 
 
-def call_gemini_tts_two_chapters_to_mp3(ch1_script: str, ch2_script: str, style_direction: str, out_mp3: Path, key_offset: int = 3) -> float:
-    """Read a ~4.5-5 minute script in 2 chapters and merge seamlessly over one continuous Studio BGM track."""
+def call_gemini_tts_two_chapters_to_mp3(
+    ch1_script: str,
+    ch2_script: str,
+    style_direction: str,
+    out_mp3: Path,
+    key_offset: int = 3,
+    scenes_ch1: list[dict] | None = None,
+    scenes_ch2: list[dict] | None = None,
+) -> float:
+    """Read a 3-5+ minute script in 2 chapters, snap scene durations to raw PCM silence valleys per chapter, and merge over continuous Studio BGM."""
     pcm1, sr1 = call_gemini_tts_raw_pcm(ch1_script, style_direction, key_offset=key_offset)
     if not ch2_script.strip():
+        if scenes_ch1:
+            compute_scene_durations_from_raw_pcm(pcm1, sr1, scenes_ch1, add_intro_sec=1.20, add_outro_sec=1.80)
         return finalize_pcm_to_mp3_with_bgm(pcm1, sr1, out_mp3)
     pcm2, _ = call_gemini_tts_raw_pcm(ch2_script, style_direction, key_offset=key_offset + 1)
+    if scenes_ch1:
+        compute_scene_durations_from_raw_pcm(pcm1, sr1, scenes_ch1, add_intro_sec=1.20, add_outro_sec=0.425)
+    if scenes_ch2:
+        compute_scene_durations_from_raw_pcm(pcm2, sr1, scenes_ch2, add_intro_sec=0.425, add_outro_sec=1.80)
     # 0.85s natural breath pause between Chapter 1 and Chapter 2
     pause_samples = int(sr1 * 0.85)
     pause_bytes = b"\x00\x00" * pause_samples
@@ -670,28 +818,84 @@ TIÊU CHUẨN BIÊN TẬP BẮT BUỘC (VIẾT NHƯ BIÊN TẬP VIÊN DU LỊCH 
 5. Không viết dòng tiêu đề rời ở đầu phần mô tả; vào thẳng câu văn chia sẻ hoàn chỉnh có dấu chấm câu."""
 
     if channel == "spotify":
-        prompt = f"""{base}
+        ch_words = random.randint(275, 385)
+        p_ckpt = (read_status_json().get(article["url"]) or {}).get("podcast_checkpoint") or {}
+        if p_ckpt.get("sp_part1") and isinstance(p_ckpt.get("sp_part1"), dict) and p_ckpt["sp_part1"].get("chapter1_speech"):
+            res_sp = p_ckpt["sp_part1"]
+        else:
+            prompt_sp1 = f"""{base}
 
-NHIỆM VỤ RIÊNG CHO SHOW PODCAST [SPOTIFY - TỐI ĐA HÓA ĐỘ DÀI CHUẨN 4000 KÝ TỰ]:
+NHIỆM VỤ BƯỚC 1 CHO SHOW PODCAST [SPOTIFY - TẬP PODCAST CHUYÊN SÂU DÀI 3 - 5 PHÚT (CHƯƠNG 1 + BÀI VIẾT SEO 4000 KÝ TỰ)]:
 - "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
 - "title": Tiêu đề tập podcast hấp dẫn, chuẩn mực, có dấu tiếng Việt (45-75 ký tự).
-- "speech_script": Kịch bản đọc voice dài khoảng 260-320 từ (1 phút 30 giây - 2 phút). Mở đầu chào thính giả của Du Lịch Checkin, kể theo mạch trải nghiệm thực tế và chiều sâu văn hóa/lịch sử/cảnh quan của địa điểm, kết lại mời xem thêm trên website Du Lịch Checkin. (Văn nói tự nhiên, không chứa URL hay ký tự gạch đầu dòng).
-- "description": Bài viết chuyên sâu dài khoảng 500-650 từ (tận dụng tối đa khung 3500-3900 ký tự của Spotify, chia 4-5 đoạn văn bằng thẻ <p>...</p>, có thể dùng <h2>/<h3> hoặc <ul>/<li> sạch). Đi sâu phân tích toàn diện các thông tin giá trị từ bài gốc, góc viết KHÁC HOÀN TOÀN kịch bản voice và khác các nền tảng khác. KHÔNG tự chèn URL vào trong đoạn văn (hệ thống sẽ tự xử lý gắn 70% Anchor Text / 30% Link trần).
+- "chapter1_speech": CHƯƠNG 1 của kịch bản đọc voice dài khoảng {ch_words} từ (~1.7 - 2.3 phút). Mở đầu chào thính giả của Du Lịch Checkin, dẫn dắt sâu sắc vào vị trí địa lý, khung cảnh thiên nhiên, nguồn gốc lịch sử, sự tích và khám phá không gian kiến trúc tổng quan của địa điểm (Văn nói truyền cảm, không chứa URL hay gạch đầu dòng).
+- "description": Bài viết chuyên sâu dài khoảng 500-650 từ (tận dụng tối đa khung 3500-3900 ký tự của Spotify, chia 4-5 đoạn văn bằng thẻ <p>...</p>, có thể dùng <h2>/<h3> hoặc <ul>/<li> sạch). Đi sâu phân tích toàn diện các thông tin giá trị từ bài gốc, góc viết KHÁC HOÀN TOÀN kịch bản voice. KHÔNG tự chèn URL vào trong đoạn văn.
 
-Trả về đúng JSON với 4 khóa: "short_location_name", "title", "speech_script", "description"."""
-        return call_gemini_json(prompt, key_offset=0)
+Trả về đúng JSON với 4 khóa: "short_location_name", "title", "chapter1_speech", "description"."""
+            res_sp = call_gemini_json(prompt_sp1, key_offset=0)
+            if not isinstance(res_sp, dict):
+                res_sp = {}
+            p_ckpt["sp_part1"] = res_sp
+            update_status_json(article["url"], "podcast_checkpoint", p_ckpt)
+
+        if p_ckpt.get("sp_part2") and isinstance(p_ckpt.get("sp_part2"), str) and len(p_ckpt["sp_part2"]) > 100:
+            ch2_sp = p_ckpt["sp_part2"]
+        else:
+            prompt_sp2 = f"""{base}
+
+NHIỆM VỤ BƯỚC 2 CHO SHOW PODCAST [SPOTIFY - CHƯƠNG 2 NỐI TIẾP ĐỂ TẬP PODCAST ĐẠT ĐỘ DÀI LINH HOẠT 3 - 5 PHÚT]:
+- Tiếp nối Chương 1, hãy viết tiếp "chapter2_speech" dài khoảng {ch_words} từ (~1.7 - 2.3 phút) khai thác trọn vẹn nửa sau bài viết: Đi sâu vào các hạng mục kiến trúc/không gian đặc sắc bên trong, lễ hội truyền thống, thời điểm tham quan lý tưởng, lộ trình di chuyển, kinh nghiệm thực tế (sắm lễ/văn khấn hoặc lịch trình khám phá), các địa điểm du lịch lân cận và lời chào kết ấm áp mời thính giả xem chi tiết trên website Du Lịch Checkin.
+- Văn nói tự nhiên, mạch lạc, không lặp lại phần chào mở đầu, không chứa URL hay ký tự gạch đầu dòng.
+
+Trả về đúng JSON với 1 khóa duy nhất: "chapter2_speech"."""
+            res_sp2 = call_gemini_json(prompt_sp2, key_offset=1)
+            ch2_sp = safe_str(res_sp2.get("chapter2_speech") if isinstance(res_sp2, dict) else "", " ")
+            p_ckpt["sp_part2"] = ch2_sp
+            update_status_json(article["url"], "podcast_checkpoint", p_ckpt)
+
+        res_sp["chapter2_speech"] = ch2_sp
+        res_sp["speech_script"] = (safe_str(res_sp.get("chapter1_speech"), " ") + "\n\n" + ch2_sp).strip()
+        return res_sp
 
     if channel == "castbox":
-        prompt = f"""{base}
+        ch_words = random.randint(275, 385)
+        p_ckpt = (read_status_json().get(article["url"]) or {}).get("podcast_checkpoint") or {}
+        if p_ckpt.get("cb_part1") and isinstance(p_ckpt.get("cb_part1"), dict) and p_ckpt["cb_part1"].get("chapter1_speech"):
+            res_cb = p_ckpt["cb_part1"]
+        else:
+            prompt_cb1 = f"""{base}
 
-NHIỆM VỤ RIÊNG CHO SHOW PODCAST [CASTBOX - TỐI ĐA HÓA ĐỘ DÀI CHUẨN 4000 KÝ TỰ]:
+NHIỆM VỤ BƯỚC 1 CHO SHOW PODCAST [CASTBOX - CẨM NANG PODCAST THỰC CHIẾN DÀI 3 - 5 PHÚT (CHƯƠNG 1 + BÀI VIẾT 4000 KÝ TỰ)]:
 - "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
 - "title": Tiêu đề tập cẩm nang viết bằng TIẾNG VIỆT KHÔNG DẤU, chỉ dùng chữ cái và số, KHÔNG dùng bất kỳ dấu câu hay ký tự đặc biệt nào (để tối ưu URL sạch 100% trên Castbox, dài 45-75 ký tự, VD: "Cam nang tham quan va kinh nghiem di le Den Bach Ma Ha Noi").
-- "speech_script": Kịch bản đọc voice (TIẾNG VIỆT CÓ DẤU CHUẨN) dài khoảng 260-320 từ (1 phút 30 giây - 2 phút). PHONG CÁCH KHÁC HOÀN TOÀN Spotify: đi thẳng vào cẩm nang hướng dẫn thực tế (vị trí, cách di chuyển, giờ mở cửa, giá vé, điểm đáng xem nhất và lưu ý quan trọng từ bài gốc).
-- "description": Bài cẩm nang chi tiết (TIẾNG VIỆT CÓ DẤU CHUẨN) dài khoảng 500-650 từ (tận dụng tối đa khung 3500-3800 ký tự của Castbox, văn bản thuần chia 4-5 đoạn rõ ràng bằng \\n\\n, KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL vì hệ thống sẽ tự đặt dòng dẫn + link trần ở vị trí đầu/giữa/cuối phù hợp). Nội dung và cấu trúc KHÁC HOÀN TOÀN bài Spotify.
+- "chapter1_speech": CHƯƠNG 1 kịch bản đọc voice (TIẾNG VIỆT CÓ DẤU CHUẨN) dài khoảng {ch_words} từ (~1.7 - 2.3 phút). PHONG CÁCH KHÁC HOÀN TOÀN Spotify: đi thẳng vào cẩm nang hướng dẫn thực tế (vị trí địa lý, hướng dẫn lộ trình di chuyển cụ thể, thời điểm đẹp nhất, giờ mở cửa/giá vé, lịch sử cốt lõi và tổng quan các khu vực tham quan chính).
+- "description": Bài cẩm nang chi tiết (TIẾNG VIỆT CÓ DẤU CHUẨN) dài khoảng 500-650 từ (tận dụng tối đa khung 3500-3800 ký tự của Castbox, văn bản thuần chia 4-5 đoạn rõ ràng bằng \\n\\n, KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL). Nội dung và cấu trúc KHÁC HOÀN TOÀN bài Spotify.
 
-Trả về đúng JSON với 4 khóa: "short_location_name", "title", "speech_script", "description"."""
-        return call_gemini_json(prompt, key_offset=1)
+Trả về đúng JSON với 4 khóa: "short_location_name", "title", "chapter1_speech", "description"."""
+            res_cb = call_gemini_json(prompt_cb1, key_offset=2)
+            if not isinstance(res_cb, dict):
+                res_cb = {}
+            p_ckpt["cb_part1"] = res_cb
+            update_status_json(article["url"], "podcast_checkpoint", p_ckpt)
+
+        if p_ckpt.get("cb_part2") and isinstance(p_ckpt.get("cb_part2"), str) and len(p_ckpt["cb_part2"]) > 100:
+            ch2_cb = p_ckpt["cb_part2"]
+        else:
+            prompt_cb2 = f"""{base}
+
+NHIỆM VỤ BƯỚC 2 CHO SHOW PODCAST [CASTBOX - CHƯƠNG 2 NỐI TIẾP ĐỂ TẬP PODCAST ĐẠT ĐỘ DÀI LINH HOẠT 3 - 5 PHÚT]:
+- Tiếp nối Chương 1, hãy viết tiếp "chapter2_speech" (TIẾNG VIỆT CÓ DẤU CHUẨN) dài khoảng {ch_words} từ (~1.7 - 2.3 phút) bao quát trọn vẹn nửa sau bài viết: Hướng dẫn chi tiết kinh nghiệm thực tế (cách sắm lễ/văn khấn hoặc lịch trình khám phá từng điểm nhấn bên trong), lưu ý trang phục ứng xử, gợi ý kết hợp tham quan các địa điểm nổi tiếng lân cận có trong bài, đặc sản địa phương và lời kết.
+- Văn nói tự nhiên, rõ ràng, không chứa URL hay ký tự gạch đầu dòng.
+
+Trả về đúng JSON với 1 khóa duy nhất: "chapter2_speech"."""
+            res_cb2 = call_gemini_json(prompt_cb2, key_offset=3)
+            ch2_cb = safe_str(res_cb2.get("chapter2_speech") if isinstance(res_cb2, dict) else "", " ")
+            p_ckpt["cb_part2"] = ch2_cb
+            update_status_json(article["url"], "podcast_checkpoint", p_ckpt)
+
+        res_cb["chapter2_speech"] = ch2_cb
+        res_cb["speech_script"] = (safe_str(res_cb.get("chapter1_speech"), " ") + "\n\n" + ch2_cb).strip()
+        return res_cb
 
     if channel == "dailymotion":
         img_items = article.get("image_items") or []
@@ -729,9 +933,15 @@ Trả về đúng JSON với 5 khóa:
             res = {}
         scenes = res.get("scenes") or []
         if scenes and isinstance(scenes, list):
-            res["speech_script"] = " ".join(
-                str(s.get("narration", "")).strip() for s in scenes if isinstance(s, dict) and str(s.get("narration", "")).strip()
-            )
+            clean_narrs = []
+            for s in scenes:
+                if isinstance(s, dict) and str(s.get("narration", "")).strip():
+                    nt = str(s.get("narration", "")).strip()
+                    if not nt.endswith((".", "!", "?")):
+                        nt += "."
+                    s["narration"] = nt
+                    clean_narrs.append(nt)
+            res["speech_script"] = "\n\n".join(clean_narrs)
         if not res.get("speech_script"):
             res["speech_script"] = f"Cùng Du Lịch Checkin khám phá {article['h1']}."
         if not res.get("title"):
@@ -836,6 +1046,10 @@ Trả về đúng JSON với 1 khóa duy nhất:
                 update_status_json(article["url"], "yt_checkpoint", ckpt)
 
             for s in chunk_scenes:
+                nt = str(s.get("narration", "")).strip()
+                if nt and not nt.endswith((".", "!", "?")):
+                    nt += "."
+                s["narration"] = nt
                 w_idx = s.get("web_image_index")
                 if isinstance(w_idx, int) and 0 <= w_idx < len(web_items):
                     if w_idx in used_web_global:
@@ -850,9 +1064,11 @@ Trả về đúng JSON với 1 khóa duy nhất:
 
         res_yt = dict(seo_meta)
         res_yt["scenes"] = all_scenes
-        res_yt["chapter1_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes_ch1) or f"Cùng khám phá {article['h1']}."
-        res_yt["chapter2_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes_ch2)
-        res_yt["speech_script"] = (res_yt["chapter1_speech"] + " " + res_yt["chapter2_speech"]).strip()
+        res_yt["scenes_ch1"] = scenes_ch1
+        res_yt["scenes_ch2"] = scenes_ch2
+        res_yt["chapter1_speech"] = "\n\n".join(str(s.get("narration", "")).strip() for s in scenes_ch1) or f"Cùng khám phá {article['h1']}."
+        res_yt["chapter2_speech"] = "\n\n".join(str(s.get("narration", "")).strip() for s in scenes_ch2)
+        res_yt["speech_script"] = (res_yt["chapter1_speech"] + "\n\n" + res_yt["chapter2_speech"]).strip()
         print(f"Generated 4-Chunk YouTube Script: Chapter 1 ({len(scenes_ch1)} scenes) + Chapter 2 ({len(scenes_ch2)} scenes) = {len(all_scenes)} total scenes!")
         return res_yt
 
@@ -1259,15 +1475,8 @@ def verify_photo_candidates_with_gemini_vision(candidates: list[dict], query_vi:
         parts.append({"text": f"--- ỨNG VIÊN #{c_i} ---"})
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": c["b64"]}})
 
-    models = [
-        "gemini-3.8-flash",
-        "gemini-3.7-flash",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
-        "gemini-3-flash-preview",
-        "gemini-3.5-flash-lite",
-        "gemini-flash-lite-latest",
-    ]
+    global _LAST_GOOD_GEMINI_MODEL
+    models = get_prioritized_gemini_models()
     for m_idx, model in enumerate(models):
         key = GEMINI_KEYS[(scene_idx + m_idx) % len(GEMINI_KEYS)]
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
@@ -1278,6 +1487,7 @@ def verify_photo_candidates_with_gemini_vision(candidates: list[dict], query_vi:
         try:
             r = requests.post(url, json=payload, timeout=20)
             if r.status_code == 200:
+                _LAST_GOOD_GEMINI_MODEL = model
                 txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
                 txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.I).strip()
                 parsed = json.loads(txt)
@@ -1390,8 +1600,70 @@ def search_and_download_scene_real_photo(query_vi: str, short_loc: str, used_url
     return None, ""
 
 
+def render_broadcast_transition_frame(prev_im, curr_im, ease: float, style_idx: int, scene_num: int):
+    """Render 1 of 5 smooth broadcast documentary transition styles at 1280x720 RGB with cosine easing (zero black flash)."""
+    from PIL import Image
+
+    if style_idx == 0:
+        # 1. Cross-Dissolve (Mờ chồng truyền hình mượt mà)
+        return Image.blend(prev_im, curr_im, ease)
+
+    if style_idx == 1:
+        # 2. Smooth Push Slide (Trượt khung hình có gia tốc Easing trái/phải)
+        out = Image.new("RGB", (1280, 720))
+        shift = int(round(1280 * ease))
+        if scene_num % 2 == 1:
+            out.paste(prev_im, (-shift, 0))
+            out.paste(curr_im, (1280 - shift, 0))
+        else:
+            out.paste(prev_im, (shift, 0))
+            out.paste(curr_im, (shift - 1280, 0))
+        return out
+
+    if style_idx == 2:
+        # 3. Soft Feather Wipe (Quét mở màn ảnh viền mềm 140px)
+        feather = 140.0
+        edge = -feather + (1280.0 + 2.0 * feather) * ease
+        row_vals = [
+            255
+            if x <= edge - feather
+            else (0 if x >= edge + feather else int(round(255.0 * (1.0 - (x - (edge - feather)) / (2.0 * feather)))))
+            for x in range(1280)
+        ]
+        mask_1d = Image.new("L", (1280, 1))
+        mask_1d.putdata(row_vals)
+        mask = mask_1d.resize((1280, 720), Image.Resampling.NEAREST)
+        return Image.composite(curr_im, prev_im, mask)
+
+    if style_idx == 3:
+        # 4. Zoom-Dissolve (Phóng nhẹ 6% tạo chiều sâu kết hợp hòa tan sang cảnh mới)
+        z_w = max(640, int(round(1280 * (1.0 - 0.06 * ease))))
+        z_h = max(360, int(round(720 * (1.0 - 0.06 * ease))))
+        x0 = (1280 - z_w) // 2
+        y0 = (720 - z_h) // 2
+        zoomed_prev = prev_im.crop((x0, y0, x0 + z_w, y0 + z_h)).resize((1280, 720), Image.Resampling.BILINEAR)
+        return Image.blend(zoomed_prev, curr_im, ease)
+
+    # 5. Center Curtain Reveal (Mở khung tiêu điểm từ tâm ra hai bên)
+    feather = 100.0
+    half_span = (640.0 + feather) * ease
+    row_vals = []
+    for x in range(1280):
+        dist = abs(x - 640.0)
+        if dist <= half_span - feather:
+            row_vals.append(255)
+        elif dist >= half_span + feather:
+            row_vals.append(0)
+        else:
+            row_vals.append(int(round(255.0 * (1.0 - (dist - (half_span - feather)) / (2.0 * feather)))))
+    mask_1d = Image.new("L", (1280, 1))
+    mask_1d.putdata(row_vals)
+    mask = mask_1d.resize((1280, 720), Image.Resampling.NEAREST)
+    return Image.composite(curr_im, prev_im, mask)
+
+
 def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_sec: float, out_mp4: Path, scenes: list | None = None, short_loc: str = "Du lịch Việt Nam", max_scenes: int = 16):
-    """Build a crisp 1280x720 HD video with 100% uncropped real photos (web photos + scene-by-scene search), zero AI images, zero duplicate photos."""
+    """Build a crisp 1280x720 HD video with 100% 1-to-1 scene alignment, raw PCM silence-snapped durations, and 5 rotating broadcast transitions."""
     import io
     from PIL import Image
 
@@ -1404,20 +1676,32 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
     used_hashes: list[int] = []
     used_web_indices = set()
 
-    dl_imgs = []
-    weights = []
+    # Pre-cache valid web images so fallback is always instant and guaranteed 100% non-empty
+    cached_web_ims = []
+    for wu in image_urls[:16]:
+        try:
+            r = requests.get(wu, headers=headers, timeout=12)
+            if r.status_code == 200 and len(r.content) > 6000:
+                wim = Image.open(io.BytesIO(r.content)).convert("RGB")
+                cached_web_ims.append((wu, wim, compute_image_ahash(wim)))
+        except Exception:
+            continue
 
-    active_scenes = (scenes or [])[:max_scenes]
+    tv_frames = []
+    scene_durs = []
+    speech_weights = []
+
+    active_scenes = [sc for sc in (scenes or [])[:max_scenes] if isinstance(sc, dict)]
     if not active_scenes:
-        active_scenes = [{"web_image_index": i, "caption": short_loc, "narration": short_loc} for i in range(min(15, len(image_urls)))]
+        active_scenes = [{"web_image_index": i, "caption": short_loc, "narration": short_loc} for i in range(min(15, max(1, len(image_urls))))]
 
     total_spec_count = len(active_scenes)
 
     for idx, sc in enumerate(active_scenes):
-        if not isinstance(sc, dict):
-            continue
-        words = max(5, len(str(sc.get("narration", "")).split()))
-        cap = str(sc.get("caption") or sc.get("narration") or short_loc).strip()
+        narr_txt = str(sc.get("narration") or "").strip()
+        words = max(5, len(narr_txt.split()))
+        sp_weight = compute_scene_speech_weight(narr_txt)
+        cap = str(sc.get("caption") or narr_txt or short_loc).strip()
         web_idx = sc.get("web_image_index") if "web_image_index" in sc else sc.get("image_index", -1)
         search_q = str(sc.get("search_query_vi") or "").strip()
 
@@ -1448,96 +1732,116 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
             if raw_im is not None:
                 chosen_url = f"[VISION_VERIFIED_SEARCH: '{search_q}'] {ext_u}"
 
-        # 3. Fallback: pick any remaining unused photo from image_urls pool
+        # 3. Fallback: pick any remaining unused photo from cached_web_ims / image_urls pool
         if raw_im is None:
-            for pool_i, pool_u in enumerate(image_urls):
+            for pool_i, (pool_u, pool_im, pool_ah) in enumerate(cached_web_ims):
                 if pool_u in used_urls:
                     continue
-                try:
-                    r = requests.get(pool_u, headers=headers, timeout=12)
-                    if r.status_code == 200 and len(r.content) > 6000:
-                        im = Image.open(io.BytesIO(r.content)).convert("RGB")
-                        if "dulichcheckin.com" not in pool_u and has_bottom_title_banner(im):
-                            continue
-                        ah = compute_image_ahash(im)
-                        if not is_near_duplicate_hash(ah, used_hashes, max_dist=5):
-                            raw_im = im
-                            chosen_url = f"[POOL #{pool_i}] {pool_u}"
-                            used_web_indices.add(pool_i)
-                            used_urls.add(pool_u)
-                            used_hashes.append(ah)
-                            break
-                except Exception:
+                if "dulichcheckin.com" not in pool_u and has_bottom_title_banner(pool_im):
                     continue
+                if not is_near_duplicate_hash(pool_ah, used_hashes, max_dist=5):
+                    raw_im = pool_im
+                    chosen_url = f"[POOL #{pool_i}] {pool_u}"
+                    used_web_indices.add(pool_i)
+                    used_urls.add(pool_u)
+                    used_hashes.append(pool_ah)
+                    break
 
-        # 4. Last-resort search with caption + short_loc if pool is exhausted
+        # 4. Second external search with caption + short_loc if pool is exhausted
         if raw_im is None:
             raw_im, ext_u = search_and_download_scene_real_photo(f"{cap} {short_loc}", short_loc, used_urls, used_hashes, cap=cap, scene_idx=idx)
             if raw_im is not None:
                 chosen_url = f"[CAPTION_SEARCH: '{cap}'] {ext_u}"
 
-        if raw_im is not None:
-            tv_frame = render_tv_frame_1280x720(raw_im, cap, short_loc, len(dl_imgs) + 1, total_spec_count, zoom_center=False)
-            p = WORK_DIR / f"slide_{idx}.jpg"
-            tv_frame.save(p, "JPEG", quality=93)
-            dl_imgs.append(p)
-            weights.append(words)
-            print(f"Scene #{len(dl_imgs)}/{total_spec_count} ({words} words | '{cap[:38]}') -> {chosen_url}")
-        else:
-            print(f"Warning: Could not resolve unique photo for scene #{idx+1} ('{cap}')")
+        # 5. GUARANTEED 1-TO-1 SCENE ALIGNMENT FALLBACK (Never skip a scene so voice and image never drift out of sync!)
+        if raw_im is None and cached_web_ims:
+            fb_u, fb_im, _ = cached_web_ims[idx % len(cached_web_ims)]
+            raw_im = fb_im
+            chosen_url = f"[SYNC_SAFE_WEB_FALLBACK] {fb_u}"
 
-    if not dl_imgs:
+        if raw_im is not None:
+            scene_num = len(tv_frames) + 1
+            tv_frame = render_tv_frame_1280x720(raw_im, cap, short_loc, scene_num, total_spec_count, zoom_center=False)
+            if idx == 0:
+                tv_frame.save(WORK_DIR / "slide_0.jpg", "JPEG", quality=93)
+            tv_frames.append(tv_frame)
+            speech_weights.append(sp_weight)
+            exact_d = sc.get("exact_duration_sec")
+            scene_durs.append(float(exact_d) if (isinstance(exact_d, (int, float)) and exact_d > 1.5) else 0.0)
+            print(f"Scene #{scene_num}/{total_spec_count} ({words}w | dur={scene_durs[-1]:.2f}s | '{cap[:36]}') -> {chosen_url}")
+
+    if not tv_frames:
         raise RuntimeError("Could not download any article images from dulichcheckin.com")
 
-    # Calculate each slide's exact duration proportional to the spoken words in its scene
-    total_w = sum(weights) or len(dl_imgs)
-    total_target = duration_sec + 0.4
-    clip_paths = []
+    # Resolve final per-scene durations locked 100% to duration_sec (with 1.2s Intro BGM + 1.8s Outro BGM if not already snapped from raw PCM)
+    if all(d > 1.5 for d in scene_durs):
+        sum_exact = sum(scene_durs) or duration_sec
+        final_durs = [d * (duration_sec / sum_exact) for d in scene_durs]
+    else:
+        voice_only_dur = max(5.0, duration_sec - 3.0)
+        tot_w = sum(speech_weights) or float(len(tv_frames))
+        final_durs = [voice_only_dur * (w / tot_w) for w in speech_weights]
+        final_durs[0] += 1.20
+        final_durs[-1] += 1.80
 
-    for i, (img_p, w) in enumerate(zip(dl_imgs, weights)):
-        seg_dur = max(2.5, total_target * (w / total_w))
-        clip_p = WORK_DIR / f"clip_{i}.mp4"
-        fade_Out_st = max(0.5, seg_dur - 0.35)
-        # First slide starts at 100% brightness immediately at 0.00s so auto-thumbnails are never dark!
-        if i == 0:
-            vf_str = f"scale=1280:720,fade=t=out:st={fade_Out_st:.2f}:d=0.35,format=yuv420p"
-        else:
-            vf_str = f"scale=1280:720,fade=t=in:st=0:d=0.35,fade=t=out:st={fade_Out_st:.2f}:d=0.35,format=yuv420p"
-        subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-loop", "1", "-t", f"{seg_dur:.2f}",
-                "-i", str(img_p),
-                "-vf", vf_str,
-                "-r", "25",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
-                "-an", str(clip_p),
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        clip_paths.append(clip_p)
+    # Single-pass 25fps rawvideo pipe to FFmpeg: zero cumulative rounding drift, zero black screen flashes, 5 rotating broadcast transitions!
+    fps = 25
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-pix_fmt", "rgb24",
+        "-s", "1280x720",
+        "-r", str(fps),
+        "-i", "-",
+        "-i", str(audio_mp3),
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "22",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-t", f"{duration_sec:.2f}",
+        "-movflags", "+faststart",
+        str(out_mp4),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cum_dur = 0.0
+    written_frames = 0
+    try:
+        for i, (curr_im, seg_dur) in enumerate(zip(tv_frames, final_durs)):
+            cum_dur += seg_dur
+            target_end_frame = int(round(cum_dur * fps))
+            seg_frames = max(fps, target_end_frame - written_frames)
+            curr_bytes = curr_im.tobytes()
 
-    concat_txt = WORK_DIR / "concat.txt"
-    concat_txt.write_text("\n".join(f"file '{cp.resolve()}'" for cp in clip_paths), encoding="utf-8")
+            if i == 0:
+                for _ in range(seg_frames):
+                    proc.stdin.write(curr_bytes)
+            else:
+                prev_im = tv_frames[i - 1]
+                trans_frames = min(13, max(8, seg_frames // 5))
+                style_idx = (i - 1) % 5
+                for f_idx in range(trans_frames):
+                    raw_p = (f_idx + 1) / float(trans_frames + 1)
+                    ease = 0.5 - 0.5 * math.cos(math.pi * raw_p)
+                    tr_im = render_broadcast_transition_frame(prev_im, curr_im, ease, style_idx, i)
+                    proc.stdin.write(tr_im.tobytes())
+                hold_frames = max(1, seg_frames - trans_frames)
+                for _ in range(hold_frames):
+                    proc.stdin.write(curr_bytes)
 
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0", "-i", str(concat_txt),
-            "-i", str(audio_mp3),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p",
-            "-r", "25",
-            "-c:a", "aac", "-b:a", "128k",
-            "-t", f"{duration_sec:.2f}",
-            "-movflags", "+faststart",
-            str(out_mp4),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+            written_frames += seg_frames
+        proc.stdin.close()
+    except Exception as pipe_err:
+        print(f"FFmpeg pipe note: {pipe_err}")
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"FFmpeg rawvideo encode failed with exit code {proc.returncode}")
 
 
 def upload_to_dailymotion(mp4_path: Path, title: str, description: str, tags: str, article_url: str, short_loc: str) -> str:
@@ -1838,7 +2142,7 @@ def get_or_build_hd_video(article: dict, slug: str, now_str: str) -> tuple[Path,
     style_dir = (
         "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
     )
-    duration = call_gemini_tts_to_mp3(speech, style_dir, mp3_path, key_offset=2)
+    duration = call_gemini_tts_to_mp3(speech, style_dir, mp3_path, key_offset=2, scenes=master_data.get("scenes"))
     print(f"Generated Video Voice MP3 (with Studio BGM): {mp3_path.name} ({duration:.1f}s)")
     build_hd_video_from_images(article["images"], mp3_path, duration, mp4_path, master_data.get("scenes"), short_loc)
     print(f"Built HD MP4: {mp4_path.name} ({mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
@@ -1875,10 +2179,16 @@ def main():
     for ch in channels:
         print(f"\n=== Processing channel: {ch.upper()} ===")
 
-        if ch in ("spotify", "castbox"):
+        if ch == "prerender":
+            mp4_path, mp4_release_url, duration, short_loc, _ = get_or_build_hd_video(article, slug, now_str)
+            print(f"Pre-rendered & cached 2-Min HD Video MP4 for today's schedule: {mp4_release_url} ({duration:.1f}s)")
+
+        elif ch in ("spotify", "castbox"):
             script_data = generate_channel_script(ch, article)
             ep_title = safe_str(script_data.get("title")) or article["h1"]
             speech = safe_str(script_data.get("speech_script"), " ")
+            ch1_sp = safe_str(script_data.get("chapter1_speech"), " ")
+            ch2_sp = safe_str(script_data.get("chapter2_speech"), " ")
             desc = safe_str(script_data.get("description"), "\n\n")
             short_loc = safe_str(script_data.get("short_location_name")) or re.split(r"[:|–—?-]", article["h1"])[0].strip()
 
@@ -1886,8 +2196,11 @@ def main():
             style_dir = (
                 "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
             )
-            duration = call_gemini_tts_to_mp3(speech, style_dir, mp3_path, key_offset=channels.index(ch))
-            print(f"Generated MP3 (with Studio BGM): {mp3_path.name} ({duration:.1f}s)")
+            if ch1_sp and ch2_sp:
+                duration = call_gemini_tts_two_chapters_to_mp3(ch1_sp, ch2_sp, style_dir, mp3_path, key_offset=channels.index(ch))
+            else:
+                duration = call_gemini_tts_to_mp3(speech, style_dir, mp3_path, key_offset=channels.index(ch))
+            print(f"Generated 3-5 Min Podcast MP3 (2 Chapters + Studio BGM): {mp3_path.name} ({duration:.1f}s)")
 
             mp3_url, mp3_size = upload_mp3_to_github_release(mp3_path)
             ep_cov_jpg = WORK_DIR / f"{slug}-{ch}-cover.jpg"
@@ -1937,18 +2250,24 @@ def main():
             yt_full_desc = enforce_varied_bare_link_plain(yt_raw_desc, article_url, yt_short_loc, max_chars=4600)
             yt_tags = safe_str(yt_data.get("tags")) or f"du lịch checkin, {yt_short_loc}, du lịch việt nam"
 
-            # Build dedicated ~4.5 - 5 minute (2-chapter, 42 scenes) HD video with Persistent Audio Checkpoint
+            # Build dedicated ~5 minute (2-chapter, 40 scenes) HD video with Raw PCM Silence-Snapped Durations & Boosted Studio BGM
             file_tag = "preview-5min" if is_preview else "youtube-5min"
             yt_mp3_path = WORK_DIR / f"{slug}-{file_tag}.mp3"
             ckpt = (read_status_json().get(article_url) or {}).get("yt_checkpoint") or {}
             yt_duration = 0.0
-            if ckpt.get("voice_mp3_url") and ckpt.get("voice_duration_sec"):
+            saved_durs = ckpt.get("scene_durations_v2")
+            all_scenes_list = yt_data.get("scenes") or []
+
+            if ckpt.get("bgm_v2") and ckpt.get("voice_mp3_url") and ckpt.get("voice_duration_sec") and isinstance(saved_durs, list) and len(saved_durs) == len(all_scenes_list):
                 try:
                     vr = requests.get(ckpt["voice_mp3_url"], timeout=45)
                     if vr.status_code == 200 and len(vr.content) > 50000:
                         yt_mp3_path.write_bytes(vr.content)
                         yt_duration = float(ckpt["voice_duration_sec"])
-                        print(f"Resumed 5-Min Voice MP3 from checkpoint ({yt_duration:.1f}s): {ckpt['voice_mp3_url']}")
+                        for sc_obj, d_val in zip(all_scenes_list, saved_durs):
+                            if isinstance(sc_obj, dict):
+                                sc_obj["exact_duration_sec"] = float(d_val)
+                        print(f"Resumed 5-Min Voice MP3 + Exact PCM Scene Durations from checkpoint ({yt_duration:.1f}s): {ckpt['voice_mp3_url']}")
                 except Exception:
                     yt_duration = 0.0
 
@@ -1956,13 +2275,23 @@ def main():
                 style_dir = (
                     "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
                 )
-                ch1_speech = safe_str(yt_data.get("chapter1_speech") or yt_data.get("speech_script"), " ")
-                ch2_speech = safe_str(yt_data.get("chapter2_speech"), " ")
-                yt_duration = call_gemini_tts_two_chapters_to_mp3(ch1_speech, ch2_speech, style_dir, yt_mp3_path, key_offset=3)
-                print(f"Generated Dedicated 5-Min Voice MP3 (2 Chapters + Studio BGM): {yt_mp3_path.name} ({yt_duration:.1f}s)")
+                ch1_speech = safe_str(yt_data.get("chapter1_speech") or yt_data.get("speech_script"), "\n\n")
+                ch2_speech = safe_str(yt_data.get("chapter2_speech"), "\n\n")
+                yt_duration = call_gemini_tts_two_chapters_to_mp3(
+                    ch1_speech,
+                    ch2_speech,
+                    style_dir,
+                    yt_mp3_path,
+                    key_offset=3,
+                    scenes_ch1=yt_data.get("scenes_ch1"),
+                    scenes_ch2=yt_data.get("scenes_ch2"),
+                )
+                print(f"Generated Dedicated 5-Min Voice MP3 (2 Chapters + Boosted Studio BGM + PCM Silence Sync): {yt_mp3_path.name} ({yt_duration:.1f}s)")
                 voice_rel_url, _ = upload_mp3_to_github_release(yt_mp3_path)
                 ckpt["voice_mp3_url"] = voice_rel_url
                 ckpt["voice_duration_sec"] = round(yt_duration, 1)
+                ckpt["bgm_v2"] = True
+                ckpt["scene_durations_v2"] = [float(sc.get("exact_duration_sec", 7.5)) for sc in all_scenes_list if isinstance(sc, dict)]
                 update_status_json(article_url, "yt_checkpoint", ckpt)
 
             yt_mp4_path = WORK_DIR / f"{slug}-{file_tag}.mp4"
