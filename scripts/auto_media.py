@@ -248,9 +248,9 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
         parts.append({"text": f"--- ẢNH ỨNG VIÊN #{idx} ---"})
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": cand["b64"]}})
 
-    models = ["gemini-2.5-flash", "gemini-3.8-flash"]
+    models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-2.0-flash"]
     for m_idx, model in enumerate(models):
-        for k_try in range(min(3, len(GEMINI_KEYS))):
+        for k_try in range(min(2, len(GEMINI_KEYS))):
             key = GEMINI_KEYS[(m_idx + k_try) % len(GEMINI_KEYS)]
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
             payload = {
@@ -276,23 +276,33 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
                                 "source": "bing_vision",
                             })
                     if verified:
-                        print(f"Gemini Vision approved {len(verified)}/{len(valid_candidates)} external photos with visual descriptions!")
+                        print(f"Gemini Vision ({model}) approved {len(verified)}/{len(valid_candidates)} external photos!")
                         return verified
+                elif vr.status_code in (429, 503):
+                    time.sleep(2)
             except Exception as e:
                 print(f"Gemini Vision note ({model}): {e}")
 
-    # Fallback if vision call hit quota: return top 10 valid candidates
+    # Fallback if vision call hit quota: return top 12 valid candidates
     return [
-        {"url": c["url"], "desc": f"[Ảnh thực tế tìm kiếm] Khung cảnh {loc_short}", "source": "bing_fallback"}
-        for c in valid_candidates[:10]
+        {"url": c["url"], "desc": f"[Ảnh thực tế tìm kiếm] Khung cảnh {loc_short} ({c['query']})", "source": "bing_fallback"}
+        for c in valid_candidates[:12]
     ]
 
 
 def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
-    models = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.6-flash"]
+    models = [
+        "gemini-2.5-flash",
+        "gemini-3.8-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-3.8-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-2.0-flash",
+        "gemini-2.5-pro",
+    ]
     last_err = ""
     for m_idx, model in enumerate(models):
-        for k_try in range(min(3, len(GEMINI_KEYS))):
+        for k_try in range(len(GEMINI_KEYS)):
             key = GEMINI_KEYS[(key_offset + m_idx + k_try) % len(GEMINI_KEYS)]
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
             payload = {
@@ -300,7 +310,7 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
                 "generationConfig": {"temperature": 0.72, "responseMimeType": "application/json"},
             }
             try:
-                r = requests.post(url, json=payload, timeout=90)
+                r = requests.post(url, json=payload, timeout=110)
                 if r.status_code == 200:
                     txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
                     parsed = json.loads(txt)
@@ -311,7 +321,7 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
                     return parsed
                 last_err = f"HTTP {r.status_code} ({model}): {r.text[:200]}"
                 if r.status_code in (429, 503):
-                    time.sleep(2)
+                    time.sleep(3)
             except Exception as e:
                 last_err = str(e)
     raise RuntimeError(f"Gemini JSON failed: {last_err}")
