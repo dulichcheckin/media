@@ -207,21 +207,21 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
         except Exception as e:
             print(f"Bing query '{q}' note: {e}")
 
-    # Download candidate images and prepare compact 320x200 thumbnails for Gemini Multimodal Vision
+    # Download candidate images and prepare compact 256x160 thumbnails for Gemini Multimodal Vision
     valid_candidates = []
     for u, q in raw_candidates:
-        if len(valid_candidates) >= 18:
+        if len(valid_candidates) >= 14:
             break
         try:
-            ir = requests.get(u, headers=b_headers, timeout=7)
+            ir = requests.get(u, headers=b_headers, timeout=6)
             if ir.status_code == 200 and len(ir.content) > 8000:
                 im = Image.open(io.BytesIO(ir.content)).convert("RGB")
                 w, h = im.size
                 if w < 420 or h < 260 or (w / float(h)) > 2.8 or (h / float(w)) > 2.2:
                     continue
-                thumb = ImageOps.contain(im, (320, 200), method=Image.Resampling.BILINEAR)
+                thumb = ImageOps.contain(im, (256, 160), method=Image.Resampling.BILINEAR)
                 buf = io.BytesIO()
-                thumb.save(buf, format="JPEG", quality=72)
+                thumb.save(buf, format="JPEG", quality=68)
                 b64_thumb = base64.b64encode(buf.getvalue()).decode("ascii")
                 valid_candidates.append({"url": u, "query": q, "b64": b64_thumb})
         except Exception:
@@ -239,7 +239,7 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
                 "Hãy NHÌN TRỰC TIẾP vào từng bức ảnh để kiểm duyệt và mô tả:\n"
                 "1. CHỈ GIỮ LẠI những bức ảnh chụp cảnh quan, kiến trúc, cổng đền/chùa, ban thờ, tượng thờ, hang động, giếng cổ, thiên nhiên, lễ hội hoặc không gian thực tế phù hợp với địa điểm này.\n"
                 "2. LOẠI BỎ NGAY những ảnh bị lỗi, ảnh có chữ quảng cáo/bảng giá đè to giữa hình, ảnh bản đồ, ảnh chụp màn hình văn bản, ảnh chân dung tự sướng cận mặt, hoặc ảnh nhìn rõ là của địa danh khác không liên quan.\n"
-                "3. Với mỗi bức ảnh ĐẠT CHUẨN, hãy viết 'visual_desc' (8-15 từ tiếng Việt có dấu) mô tả thật cụ thể những gì mắt bạn nhìn thấy trong bức ảnh đó (VD: 'Cổng tam quan cổ kính dưới tán cây cổ thụ nhìn ra biển', 'Bậc đá rêu phong dẫn lên khu vực hang động và Giếng Tiên', 'Không gian ban thờ chính điện trang nghiêm rực rỡ sắc vàng').\n\n"
+                "3. Với mỗi bức ảnh ĐẠT CHUẨN, hãy viết 'visual_desc' (8-14 từ tiếng Việt có dấu) mô tả thật cụ thể những gì mắt bạn nhìn thấy trong bức ảnh đó.\n\n"
                 "Trả về đúng JSON theo cấu trúc: {\"approved\": [{\"index\": số_nguyên, \"visual_desc\": \"Mô tả chi tiết những gì thấy trong ảnh\"}]}"
             )
         }
@@ -249,13 +249,11 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": cand["b64"]}})
 
     models = [
-        "gemini-3.7-flash",
-        "gemini-3.5-flash",
+        "gemini-3-flash-preview",
         "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite",
-        "gemini-omni-1.2-flash",
-        "gemini-3.8-flash",
+        "gemini-flash-lite-latest",
         "gemini-3.6-flash",
+        "gemini-3.8-flash",
     ]
     for m_idx, model in enumerate(models):
         for k_try in range(min(2, len(GEMINI_KEYS))):
@@ -263,10 +261,10 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
             payload = {
                 "contents": [{"parts": parts}],
-                "generationConfig": {"temperature": 0.25, "maxOutputTokens": 4096, "responseMimeType": "application/json"},
+                "generationConfig": {"temperature": 0.25, "responseMimeType": "application/json"},
             }
             try:
-                vr = requests.post(url, json=payload, timeout=90)
+                vr = requests.post(url, json=payload, timeout=75)
                 if vr.status_code == 200:
                     txt = vr.json()["candidates"][0]["content"]["parts"][0]["text"]
                     parsed = json.loads(txt)
@@ -300,13 +298,13 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
 
 def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
     models = [
+        "gemini-3-flash-preview",
+        "gemini-3.5-flash-lite",
+        "gemini-flash-lite-latest",
+        "gemini-3.6-flash",
+        "gemini-3.8-flash",
         "gemini-3.7-flash",
         "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite",
-        "gemini-omni-1.2-flash",
-        "gemini-3.8-flash",
-        "gemini-3.6-flash",
     ]
     last_err = ""
     for round_try in range(2):
@@ -318,7 +316,6 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {
                         "temperature": 0.7,
-                        "maxOutputTokens": 8192,
                         "responseMimeType": "application/json",
                     },
                 }
