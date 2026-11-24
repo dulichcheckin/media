@@ -243,39 +243,142 @@ def call_gemini_tts_to_mp3(speech_script: str, style_direction: str, out_mp3: Pa
     raise RuntimeError(f"Gemini TTS failed: {last_err}")
 
 
+def enforce_spotify_html_link(raw_html: str, article_url: str, short_loc: str) -> str:
+    """Clean semantic HTML for Spotify (<p>, <h2>, <h3>, <ul>, <li>, <a>) with 70% Anchor / 30% Bare Link at varied position."""
+    s = re.sub(r"```(?:html)?", "", raw_html or "", flags=re.I).strip()
+    # Strip any pre-existing links to avoid duplicates
+    s = re.sub(r"<a\b[^>]*>([\s\S]*?)</a>", r"\1", s, flags=re.I)
+    s = re.sub(re.escape(article_url), "", s, flags=re.I)
+
+    # Split into paragraphs if plain text was returned
+    if "<p" not in s.lower():
+        paras = [f"<p>{html.escape(p.strip())}</p>" for p in re.split(r"\n\s*\n", s) if p.strip()]
+    else:
+        paras = [p.strip() + "</p>" for p in re.split(r"</p>", s, flags=re.I) if p.strip()]
+
+    if not paras:
+        paras = [f"<p>{html.escape(short_loc)}</p>"]
+
+    use_anchor = (random.random() < 0.70)
+    r_pos = random.random()
+    if len(paras) >= 3:
+        target_idx = 0 if r_pos < 0.45 else (len(paras) // 2 if r_pos < 0.85 else len(paras) - 1)
+    else:
+        target_idx = 0
+
+    lead_templates = [
+        f"Bạn có thể tham khảo chi tiết lịch trình và kinh nghiệm thực tế tại {short_loc}",
+        f"Xem đầy đủ thông tin hướng dẫn tham quan {short_loc}",
+        f"Chi tiết các lưu ý đi lại và trải nghiệm tại {short_loc} được tổng hợp đầy đủ",
+    ]
+    lead = random.choice(lead_templates)
+
+    if use_anchor:
+        # Try replacing first occurrence of short_loc in target paragraph with anchor tag
+        p_html = paras[target_idx]
+        pattern = re.compile(re.escape(short_loc), re.I)
+        if pattern.search(p_html):
+            paras[target_idx] = pattern.sub(f'<a href="{article_url}">{short_loc}</a>', p_html, count=1)
+        else:
+            anchor_sentence = f' {lead.replace(short_loc, f\'<a href="{article_url}">{short_loc}</a>\')}.'
+            paras[target_idx] = re.sub(r"</p>\s*$", anchor_sentence + "</p>", p_html, flags=re.I)
+    else:
+        bare_p = f'<p>{lead}: <a href="{article_url}">{article_url}</a></p>'
+        paras.insert(min(len(paras), target_idx + 1), bare_p)
+
+    full_html = "\n".join(paras)
+    return full_html[:3950]
+
+
+def enforce_varied_bare_link_plain(raw_text: str, article_url: str, short_loc: str, max_chars: int = 3800) -> str:
+    """Clean plain text with 100% standalone bare link placed naturally at top (after P1), middle, or bottom."""
+    s = re.sub(r"<[^>]+>", " ", raw_text or "")
+    s = s.replace(article_url, "").strip()
+    paras = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n\s*\n", s) if p.strip()]
+    if not paras:
+        paras = [short_loc]
+
+    leads = [
+        f"Xem đầy đủ cẩm nang và lưu ý thực tế khi ghé thăm {short_loc} tại: {article_url}",
+        f"Chi tiết kinh nghiệm di chuyển, giờ mở cửa và lịch trình khám phá {short_loc} xem tại: {article_url}",
+        f"Tham khảo bài viết hướng dẫn chi tiết về {short_loc} tại: {article_url}",
+    ]
+    link_line = random.choice(leads)
+
+    # Budget characters for body paragraphs so link_line is never truncated
+    budget = max_chars - len(link_line) - 10
+    kept_paras = []
+    cur_len = 0
+    for p in paras:
+        if cur_len + len(p) + 2 <= budget:
+            kept_paras.append(p)
+            cur_len += len(p) + 2
+        else:
+            rem = budget - cur_len
+            if rem > 80:
+                cut = p[:rem].rsplit(" ", 1)[0].rstrip(".,;:") + "."
+                kept_paras.append(cut)
+            break
+
+    if not kept_paras:
+        kept_paras = [paras[0][:budget]]
+
+    r_pos = random.random()
+    if len(kept_paras) >= 3:
+        insert_pos = 1 if r_pos < 0.45 else (len(kept_paras) // 2 if r_pos < 0.85 else len(kept_paras))
+    elif len(kept_paras) == 2:
+        insert_pos = 1 if r_pos < 0.65 else 2
+    else:
+        insert_pos = 1
+
+    kept_paras.insert(insert_pos, link_line)
+    return "\n\n".join(kept_paras)
+
+
 def generate_channel_script(channel: str, article: dict) -> dict:
+    style_angles = [
+        "kể theo mạch hành trình trải nghiệm thực tế từ lúc đặt chân đến nơi",
+        "đi thẳng vào những giá trị cốt lõi đáng giá nhất và kinh nghiệm thực tế cho người đi lần đầu",
+        "khai thác chiều sâu lịch sử, kiến trúc, cảnh quan gắn liền với hướng dẫn tham quan thực tế",
+        "chia sẻ dưới góc nhìn một biên tập viên du lịch vừa đi thực tế về và đúc kết lại trọn vẹn thông tin",
+    ]
+    angle = random.choice(style_angles)
+
     base = f"""DỮ LIỆU THỰC TẾ TỪ BÀI VIẾT GỐC TRÊN WEBSITE DULICHCHECKIN.COM:
 - URL bài viết gốc: {article['url']}
 - Thẻ H1 bài viết gốc: {article['h1']}
 - Dàn ý H2/H3: {article['outline']}
 - Nội dung thực tế: {article['content']}
 
-QUY TẮC BẮT BUỘC:
-1. Bám sát 100% thông tin thật từ bài gốc (địa chỉ, sự tích, kiến trúc, giờ mở cửa, kinh nghiệm). Không bịa đặt.
-2. Không sáo rỗng, không dùng câu mở đầu rập khuôn ("Giữa nhịp sống hối hả...", "Nếu bạn đang tìm kiếm...").
-3. Chuẩn viết hoa tiếng Việt 100%. Tuyệt đối KHÔNG dùng emoji, icon hay ký tự đặc biệt.
-4. Kịch bản đọc ("speech_script") phải là văn nói tự nhiên, mạch lạc, dễ nghe khi đọc thành tiếng (không chứa URL, không chứa ký hiệu gạch đầu dòng hay dấu sao)."""
+TIÊU CHUẨN BIÊN TẬP BẮT BUỘC (VIẾT NHƯ BIÊN TẬP VIÊN DU LỊCH CHUYÊN NGHIỆP):
+1. Xác định chính xác tên địa điểm / chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa ("short_location_name", 3-6 từ, VD: "Đền Bạch Mã", "Chùa Vĩnh Tràng", "các ngôi chùa nổi tiếng ở Hà Nội").
+2. Bám sát 100% thông tin thật từ bài gốc (địa chỉ, sự tích, kiến trúc, giờ mở cửa, giá vé, món ăn, lưu ý). Không bịa đặt.
+3. Không sáo rỗng, không lan man, cấm tuyệt đối văn mẫu ("Giữa nhịp sống hối hả...", "Nếu bạn đang tìm kiếm...", "Không chỉ là một điểm đến..."). Biến hóa cấu trúc tự nhiên ({angle}).
+4. Chuẩn viết hoa tiếng Việt 100% (chỉ viết hoa đầu câu và danh từ riêng). Tuyệt đối KHÔNG dùng emoji, icon hay ký tự trang trí.
+5. Không viết dòng tiêu đề rời ở đầu phần mô tả; vào thẳng câu văn chia sẻ hoàn chỉnh có dấu chấm câu."""
 
     if channel == "spotify":
         prompt = f"""{base}
 
-NHIỆM VỤ RIÊNG CHO SHOW PODCAST [SPOTIFY - KỂ CHUYỆN TRẢI NGHIỆM]:
+NHIỆM VỤ RIÊNG CHO SHOW PODCAST [SPOTIFY - TỐI ĐA HÓA ĐỘ DÀI CHUẨN 4000 KÝ TỰ]:
+- "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
 - "title": Tiêu đề tập podcast hấp dẫn, chuẩn mực, có dấu tiếng Việt (45-75 ký tự).
-- "speech_script": Kịch bản nói dài khoảng 250-310 từ (tương đương 1 phút 30 giây - 2 phút khi đọc). Mở đầu tự nhiên chào thính giả của Du Lịch Checkin, kể theo mạch hành trình trải nghiệm thực tế và chiều sâu văn hóa/lịch sử nổi bật của địa điểm, kết lại gọn gàng mời người nghe xem thêm hướng dẫn chi tiết trên website Du Lịch Checkin.
-- "description": Đoạn mô tả tập podcast dài 120-180 từ (văn bản thuần, chia 2 đoạn rõ ràng, KHÔNG chèn URL vì hệ thống tự gắn dòng link chuẩn ở cuối).
+- "speech_script": Kịch bản đọc voice dài khoảng 260-320 từ (1 phút 30 giây - 2 phút). Mở đầu chào thính giả của Du Lịch Checkin, kể theo mạch trải nghiệm thực tế và chiều sâu văn hóa/lịch sử/cảnh quan của địa điểm, kết lại mời xem thêm trên website Du Lịch Checkin. (Văn nói tự nhiên, không chứa URL hay ký tự gạch đầu dòng).
+- "description": Bài viết chuyên sâu dài khoảng 500-650 từ (tận dụng tối đa khung 3500-3900 ký tự của Spotify, chia 4-5 đoạn văn bằng thẻ <p>...</p>, có thể dùng <h2>/<h3> hoặc <ul>/<li> sạch). Đi sâu phân tích toàn diện các thông tin giá trị từ bài gốc, góc viết KHÁC HOÀN TOÀN kịch bản voice và khác các nền tảng khác. KHÔNG tự chèn URL vào trong đoạn văn (hệ thống sẽ tự xử lý gắn 70% Anchor Text / 30% Link trần).
 
-Trả về đúng JSON với 3 khóa: "title", "speech_script", "description"."""
+Trả về đúng JSON với 4 khóa: "short_location_name", "title", "speech_script", "description"."""
         return call_gemini_json(prompt, key_offset=0)
 
     if channel == "castbox":
         prompt = f"""{base}
 
-NHIỆM VỤ RIÊNG CHO SHOW PODCAST [CASTBOX - CẨM NANG & LƯU Ý THỰC TẾ]:
-- "title": Tiêu đề tập cẩm nang ngắn gọn, khác biệt, có dấu tiếng Việt (45-75 ký tự).
-- "speech_script": Kịch bản nói dài khoảng 250-310 từ (1 phút 30 giây - 2 phút). PHONG CÁCH KHÁC HOÀN TOÀN kiểu kể chuyện: đi thẳng vào dạng cẩm nang thực tế cho người lần đầu ghé thăm (vị trí, điểm đáng xem nhất, khung giờ đẹp, cách chuẩn bị/lưu ý quan trọng từ bài gốc). Mở đầu tự nhiên giới thiệu chuyên mục Cẩm nang Du Lịch Checkin.
-- "description": Đoạn mô tả tập cẩm nang dài 120-180 từ (tập trung liệt kê những thông tin hữu ích người nghe sẽ nhận được, chia 2 đoạn, KHÔNG chèn URL vì hệ thống tự gắn link ở cuối).
+NHIỆM VỤ RIÊNG CHO SHOW PODCAST [CASTBOX - TỐI ĐA HÓA ĐỘ DÀI CHUẨN 4000 KÝ TỰ]:
+- "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
+- "title": Tiêu đề tập cẩm nang viết bằng TIẾNG VIỆT KHÔNG DẤU, chỉ dùng chữ cái và số, KHÔNG dùng bất kỳ dấu câu hay ký tự đặc biệt nào (để tối ưu URL sạch 100% trên Castbox, dài 45-75 ký tự, VD: "Cam nang tham quan va kinh nghiem di le Den Bach Ma Ha Noi").
+- "speech_script": Kịch bản đọc voice (TIẾNG VIỆT CÓ DẤU CHUẨN) dài khoảng 260-320 từ (1 phút 30 giây - 2 phút). PHONG CÁCH KHÁC HOÀN TOÀN Spotify: đi thẳng vào cẩm nang hướng dẫn thực tế (vị trí, cách di chuyển, giờ mở cửa, giá vé, điểm đáng xem nhất và lưu ý quan trọng từ bài gốc).
+- "description": Bài cẩm nang chi tiết (TIẾNG VIỆT CÓ DẤU CHUẨN) dài khoảng 500-650 từ (tận dụng tối đa khung 3500-3800 ký tự của Castbox, văn bản thuần chia 4-5 đoạn rõ ràng bằng \\n\\n, KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL vì hệ thống sẽ tự đặt dòng dẫn + link trần ở vị trí đầu/giữa/cuối phù hợp). Nội dung và cấu trúc KHÁC HOÀN TOÀN bài Spotify.
 
-Trả về đúng JSON với 3 khóa: "title", "speech_script", "description"."""
+Trả về đúng JSON với 4 khóa: "short_location_name", "title", "speech_script", "description"."""
         return call_gemini_json(prompt, key_offset=1)
 
     if channel == "dailymotion":
@@ -289,20 +392,16 @@ Trả về đúng JSON với 3 khóa: "title", "speech_script", "description".""
 DANH SÁCH TOÀN BỘ BỘ ẢNH THỰC TẾ SẼ HIỂN THỊ TRONG VIDEO (ĐÃ ĐỌC TỪ THẺ ALT / CHÚ THÍCH ẢNH TRÊN BÀI WEB):
 {img_catalog}
 
-NHIỆM VỤ RIÊNG CHO VIDEO [DAILYMOTION - ĐẠO DIỄN KỊCH BẢN KHỚP TỪNG BỨC ẢNH]:
-1. Hãy xem kỹ danh sách ảnh ở trên để biết từng bức ảnh chụp góc nào, chi tiết gì.
-2. Lên kịch bản gồm các phân cảnh ("scenes") đi qua toàn bộ các bức ảnh đẹp trong danh sách trên (từ 7 đến 12 phân cảnh):
-   - Mỗi phân cảnh ứng với 1 bức ảnh ("image_index": số thứ tự ảnh từ 0 trở đi).
-   - Câu thuyết minh ("narration": dài khoảng 12-20 từ) của phân cảnh nào PHẢI NÓI ĐÚNG VỀ CHI TIẾT/NỘI DUNG CỦA BỨC ẢNH ĐÓ (ví dụ ảnh chụp cổng tam quan thì thuyết minh về cổng tam quan; ảnh chụp tượng thờ/chính điện thì thuyết minh về không gian thờ tự; ảnh chụp sơ đồ/lưu ý thì nói về bố cục hoặc kinh nghiệm tham quan), đồng thời nối với nhau thành một bài thuyết minh mạch lạc, tự nhiên từ đầu đến cuối video!
-3. "title": Tiêu đề video du lịch thu hút, rõ địa điểm, có dấu tiếng Việt (45-75 ký tự).
-4. "description": Đoạn mô tả video dài 130-190 từ, chia 2 đoạn súc tích, KHÔNG tự chèn URL (hệ thống sẽ tự gắn 1 dòng dẫn kèm link trần ở cuối).
+NHIỆM VỤ RIÊNG CHO VIDEO [DAILYMOTION - ĐẠO DIỄN KỊCH BẢN KHỚP TỪNG BỨC ẢNH & MÔ TẢ DÀI CHI TIẾT]:
+1. "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
+2. "title": Tiêu đề video du lịch thu hút, rõ địa điểm, có dấu tiếng Việt (45-75 ký tự).
+3. "scenes": Xem kỹ danh sách ảnh ở trên để lên kịch bản gồm 7 đến 12 phân cảnh đi qua toàn bộ bộ ảnh:
+   - Mỗi phân cảnh là 1 object {{"image_index": số_thứ_tự_ảnh, "narration": "câu thuyết minh 12-20 từ khớp chính xác với chi tiết trong bức ảnh đó"}}.
+   - Các câu "narration" khi ghép lại phải tạo thành một bài thuyết minh video hoàn chỉnh, mạch lạc, tự nhiên từ đầu đến cuối.
+4. "description": Bài viết mô tả video chuyên sâu dài khoảng 400-520 từ (tận dụng tối đa khung 2500-2900 ký tự của Dailymotion, văn bản thuần chia 4 đoạn rõ ràng bằng \\n\\n, KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL vì hệ thống sẽ tự đặt dòng dẫn + link trần ở vị trí đầu/giữa/cuối). Cung cấp trọn vẹn thông tin thực tế, lịch trình và kinh nghiệm từ bài gốc, cấu trúc KHÁC HOÀN TOÀN Spotify và Castbox.
 5. "tags": Chuỗi 5-8 từ khóa tiếng Việt ngăn cách bởi dấu phẩy.
 
-Trả về đúng JSON với 4 khóa:
-- "title": chuỗi
-- "scenes": mảng các object [{{"image_index": số_nguyên, "narration": "câu thuyết minh khớp với bức ảnh đó"}}]
-- "description": chuỗi
-- "tags": chuỗi"""
+Trả về đúng JSON với 5 khóa: "short_location_name", "title", "scenes", "description", "tags"."""
         res = call_gemini_json(prompt, key_offset=2)
         scenes = res.get("scenes") or []
         if scenes and isinstance(scenes, list):
@@ -407,7 +506,7 @@ def format_duration_hms(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: str, mp3_url: str, mp3_size: int, duration_sec: float):
+def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: str, mp3_url: str, mp3_size: int, duration_sec: float, short_loc: str):
     rss_file = ROOT_DIR / f"{channel}.xml"
     is_spotify = (channel == "spotify")
     show_title = "Du Lịch Checkin - Trải Nghiệm Việt Nam" if is_spotify else "Cam Nang Du Lich Checkin"
@@ -431,20 +530,25 @@ def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: s
     existing_items = [it for it in existing_items if f">{guid}<" not in it]
 
     pub_date = email.utils.format_datetime(datetime.datetime.now(datetime.timezone.utc))
-    desc_paragraphs = [p.strip() for p in ep_desc.split("\n") if p.strip()]
-    html_desc = "".join(f"<p>{html.escape(p)}</p>" for p in desc_paragraphs)
-    html_desc += f'<p>Xem bài viết hướng dẫn chi tiết tại: <a href="{article_url}">{article_url}</a></p>'
+    if is_spotify:
+        # Spotify: 70% Anchor Text / 30% Bare Link inside semantic HTML (<p>, <a href>) at varied top/mid/bottom position
+        final_desc_cdata = enforce_spotify_html_link(ep_desc, article_url, short_loc)
+        plain_summary = clean_html_text(final_desc_cdata)[:3800]
+    else:
+        # Castbox: 100% standalone Bare Link at varied top/mid/bottom position in plain text
+        final_desc_cdata = enforce_varied_bare_link_plain(ep_desc, article_url, short_loc, max_chars=3800)
+        plain_summary = final_desc_cdata[:3800]
 
     new_item = f"""    <item>
       <title>{html.escape(ep_title)}</title>
       <link>{html.escape(article_url)}</link>
       <guid isPermaLink="false">{html.escape(guid)}</guid>
       <pubDate>{pub_date}</pubDate>
-      <description><![CDATA[{html_desc}]]></description>
+      <description><![CDATA[{final_desc_cdata}]]></description>
       <enclosure url="{html.escape(mp3_url)}" length="{mp3_size}" type="audio/mpeg"/>
       <itunes:title>{html.escape(ep_title)}</itunes:title>
       <itunes:author>Du Lịch Checkin</itunes:author>
-      <itunes:summary>{html.escape(ep_desc[:350])} Xem chi tiết tại: {html.escape(article_url)}</itunes:summary>
+      <itunes:summary>{html.escape(plain_summary)}</itunes:summary>
       <itunes:duration>{format_duration_hms(duration_sec)}</itunes:duration>
       <itunes:explicit>false</itunes:explicit>
     </item>"""
@@ -574,7 +678,7 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
     )
 
 
-def upload_to_dailymotion(mp4_path: Path, title: str, description: str, tags: str, article_url: str) -> str:
+def upload_to_dailymotion(mp4_path: Path, title: str, description: str, tags: str, article_url: str, short_loc: str) -> str:
     # 1. Get Bearer token via Partner API client_credentials
     tok_res = requests.post(
         "https://partner.api.dailymotion.com/oauth/v1/token",
@@ -611,7 +715,7 @@ def upload_to_dailymotion(mp4_path: Path, title: str, description: str, tags: st
     uploaded_file_url = file_meta["url"]
 
     # 4. Create & publish video under Partner API /rest/user/{ooi}/videos
-    full_desc = f"{description.strip()}\n\nXem chi tiết lịch trình và kinh nghiệm tham quan tại: {article_url}"
+    full_desc = enforce_varied_bare_link_plain(description, article_url, short_loc, max_chars=2950)
     pub_payload = {
         "url": uploaded_file_url,
         "title": title[:250],
@@ -672,6 +776,7 @@ def main():
         ep_title = script_data["title"].strip()
         speech = script_data["speech_script"].strip()
         desc = script_data["description"].strip()
+        short_loc = (script_data.get("short_location_name") or re.split(r"[:|–—?-]", article["h1"])[0]).strip()
 
         mp3_path = WORK_DIR / f"{slug}-{ch}.mp3"
         style_dir = (
@@ -684,7 +789,7 @@ def main():
 
         if ch in ("spotify", "castbox"):
             mp3_url, mp3_size = upload_mp3_to_github_release(mp3_path)
-            feed_url = update_podcast_rss(ch, ep_title, desc, article_url, mp3_url, mp3_size, duration)
+            feed_url = update_podcast_rss(ch, ep_title, desc, article_url, mp3_url, mp3_size, duration, short_loc)
             print(f"Updated {ch}.xml -> {feed_url} | MP3: {mp3_url}")
             update_status_json(article_url, ch, {
                 "title": ep_title,
@@ -703,7 +808,7 @@ def main():
             dm_url = ""
             dm_note = "ok"
             try:
-                dm_url = upload_to_dailymotion(mp4_path, ep_title, desc, script_data.get("tags", "du lich viet nam, du lich checkin"), article_url)
+                dm_url = upload_to_dailymotion(mp4_path, ep_title, desc, script_data.get("tags", "du lich viet nam, du lich checkin"), article_url, short_loc)
                 print(f"Published Dailymotion Video: {dm_url}")
             except Exception as dm_err:
                 dm_note = str(dm_err)
