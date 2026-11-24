@@ -1349,8 +1349,8 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
             p = WORK_DIR / f"slide_{idx}.jpg"
             tv_frame.save(p, "JPEG", quality=93)
             dl_imgs.append(p)
-            weights.append(w)
-            print(f"Scene #{len(dl_imgs)}/{total_spec_count} ({w} words | '{cap[:38]}') -> {chosen_url}")
+            weights.append(words)
+            print(f"Scene #{len(dl_imgs)}/{total_spec_count} ({words} words | '{cap[:38]}') -> {chosen_url}")
         else:
             print(f"Warning: Could not resolve unique photo for scene #{idx+1} ('{cap}')")
 
