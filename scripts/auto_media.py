@@ -248,7 +248,15 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
         parts.append({"text": f"--- ẢNH ỨNG VIÊN #{idx} ---"})
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": cand["b64"]}})
 
-    models = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-pro-preview"]
+    models = [
+        "gemini-3.7-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-omni-1.2-flash",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+    ]
     for m_idx, model in enumerate(models):
         for k_try in range(min(2, len(GEMINI_KEYS))):
             key = GEMINI_KEYS[(m_idx + k_try) % len(GEMINI_KEYS)]
@@ -292,9 +300,12 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
 
 def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
     models = [
-        "gemini-2.5-flash",
+        "gemini-3.7-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-omni-1.2-flash",
         "gemini-3.8-flash",
-        "gemini-3.1-pro-preview",
         "gemini-3.6-flash",
     ]
     last_err = ""
@@ -1120,25 +1131,27 @@ def generate_ai_illustration_raw_image(ai_prompt_en: str, scene_idx: int):
         "warm natural lighting, ultra detailed, 8k resolution, no text, no watermark, no letters"
     )
 
-    # 1. Try Gemini 2.0 Flash Image Generation with rotating keys
+    # 1. Try Gemini Native Image Generation (3.1-flash-image / 3.1-flash-lite-image / 2.5-flash-image) with rotating keys
     if GEMINI_KEYS:
-        key = GEMINI_KEYS[scene_idx % len(GEMINI_KEYS)]
-        g_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key={urllib.parse.quote(key)}"
-        g_payload = {
-            "contents": [{"parts": [{"text": f"Generate a realistic 16:9 horizontal photo without any text: {clean_prompt}"}]}],
-            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-        }
-        try:
-            gr = requests.post(g_url, json=g_payload, timeout=25)
-            if gr.status_code == 200:
-                parts = gr.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                for pt in parts:
-                    inl = pt.get("inlineData")
-                    if inl and inl.get("data"):
-                        img_bytes = base64.b64decode(inl["data"])
-                        return Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        except Exception:
-            pass
+        img_models = ["gemini-3.1-flash-image", "gemini-3.1-flash-lite-image", "gemini-2.5-flash-image"]
+        for im_idx, im_model in enumerate(img_models):
+            key = GEMINI_KEYS[(scene_idx + im_idx) % len(GEMINI_KEYS)]
+            g_url = f"https://generativelanguage.googleapis.com/v1beta/models/{im_model}:generateContent?key={urllib.parse.quote(key)}"
+            g_payload = {
+                "contents": [{"parts": [{"text": f"Generate a realistic 16:9 horizontal photo without any text: {clean_prompt}"}]}],
+                "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+            }
+            try:
+                gr = requests.post(g_url, json=g_payload, timeout=25)
+                if gr.status_code == 200:
+                    parts = gr.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                    for pt in parts:
+                        inl = pt.get("inlineData")
+                        if inl and inl.get("data"):
+                            img_bytes = base64.b64decode(inl["data"])
+                            return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            except Exception:
+                continue
 
     # 2. Try Pollinations Flux 1280x720 HD (100% free, no API key required)
     seed = 2026 + scene_idx * 53
