@@ -364,7 +364,7 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
     last_err = ""
     for round_try in range(4):
         if round_try > 0:
-            wait_sec = 12 * round_try
+            wait_sec = 8 * round_try
             print(f"All models busy on round {round_try}, cooling down {wait_sec}s before resuming this step...")
             time.sleep(wait_sec)
         for m_idx, model in enumerate(models):
@@ -378,7 +378,7 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
                 },
             }
             try:
-                r = requests.post(url, json=payload, timeout=110)
+                r = requests.post(url, json=payload, timeout=45)
                 if r.status_code == 200:
                     txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
                     txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.I).strip()
@@ -391,10 +391,10 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
                     return parsed
                 last_err = f"HTTP {r.status_code} ({model}): {r.text[:160]}"
                 if r.status_code in (429, 503):
-                    time.sleep(5)
+                    time.sleep(2)
             except Exception as e:
                 last_err = f"{model} parse/net err: {e}"
-                time.sleep(3)
+                time.sleep(2)
     raise RuntimeError(f"Gemini JSON failed: {last_err}")
 
 
@@ -747,90 +747,114 @@ Trả về đúng JSON với 5 khóa:
             for idx, it in enumerate(web_items)
         )
         max_web_idx = max(0, len(web_items) - 1)
-
-        prompt_ch1 = f"""{base}
-
-DANH SÁCH ẢNH GỐC CÓ SẴN TRONG BÀI VIẾT WEB (CHỈ SỐ TỪ 0 ĐẾN {max_web_idx}):
-{web_catalog}
-
-NHIỆM VỤ PHẦN 1 CHO PHÓNG SỰ VIDEO [YOUTUBE HD TRÊN 5 PHÚT - CHƯƠNG 1 (21 PHÂN CẢNH ĐẦU: VỊ TRÍ, LỊCH SỬ, SỰ TÍCH & KIẾN TRÚC CHI TIẾT)]:
-1. Hãy viết CHƯƠNG 1 của phóng sự gồm ĐÚNG 21 PHÂN CẢNH ("scenes"), mỗi phân cảnh có lời bình ("narration") dài 19-23 từ (~7.3 giây/cảnh):
-   - Khai thác sâu toàn diện nửa đầu bài viết: Mở đầu ấn tượng, vị trí địa lý, khung cảnh thiên nhiên vùng đất/vịnh biển xung quanh, nguồn gốc lịch sử, sự tích / nhân vật lịch sử thờ phụng và đi sâu khám phá từng công trình kiến trúc (cổng đền, cầu đá, chính điện, ban thờ, động Sơn Trang, Giếng Tiên, thế phong thủy...).
-2. QUY TẮC GÁN ẢNH THẬT KHỚP 100% VỚI TỪNG CÂU VOICE (TUYỆT ĐỐI KHÔNG DÙNG ẢNH AI, CHỈ DÙNG 100% ẢNH CHỤP THẬT TẠI ĐỊA ĐIỂM):
-   - Với những cảnh khớp trực tiếp với một trong các tấm ảnh gốc bài web ở trên (ưu tiên dùng khoảng 7-8 tấm ảnh gốc từ chỉ số 0 đến {max_web_idx}, MỖI TẤM CHỈ DÙNG ĐÚNG 1 LẦN DUY NHẤT, không lặp lại chỉ số): Đặt `"web_image_index": số_nguyên` (0 đến {max_web_idx}).
-   - Với TẤT CẢ các cảnh còn lại (đặt `"web_image_index": -1`), bạn BẮT BUỘC viết `"search_query_vi"`: Cụm từ khóa tìm kiếm Google Maps / Google Hình Ảnh bằng Tiếng Việt thật cụ thể (5-10 từ) mô tả ĐÚNG ĐỊA DANH / DI TÍCH / VỊNH BIỂN / CẢNG TÀU tại Việt Nam đang được đọc trong câu "narration" của cảnh đó!
-   - CẤM TUYỆT ĐỐI: Không bao giờ được đặt từ khóa tìm các vật liệu xây dựng hay đồ vật rời rạc (CẤM tìm 'ngói mũi hài', 'gỗ lim', 'gạch', 'đá xanh', 'chai nhựa', 'can nước', 'vách núi đá') vì sẽ ra ảnh shop bán hàng hoặc ảnh núi Trung Quốc! Mọi cụm `"search_query_vi"` BẮT BUỘC phải chứa tên địa danh cụ thể ở Việt Nam (VD: `"Đền Cặp Tiên Vân Đồn Quảng Ninh"`, `"vịnh Bái Tử Long Vân Đồn Quảng Ninh"`, `"cảng Cái Rồng Vân Đồn Quảng Ninh"`, `"đền thờ Trần Khánh Dư Vân Đồn"`, `"cổng đền Cặp Tiên Vân Đồn"`, `"Giếng Tiên đền Cặp Tiên Quảng Ninh"`, `"khu di tích lịch sử Vân Đồn Quảng Ninh"`).
-   - LƯU Ý: 21 phân cảnh phải có 21 cụm `"search_query_vi"` KHÁC NHAU (mỗi cảnh tìm 1 góc nhìn/chi tiết cụ thể khác nhau để 21 bức ảnh hoàn toàn không trùng lặp!).
-3. Đồng thời viết bộ SEO YouTube:
-   - "short_location_name": Tên địa điểm cốt lõi có dấu (3-6 từ).
-   - "title": Tiêu đề video YouTube hấp dẫn, chuẩn SEO (50-85 ký tự).
-   - "description": Bài cẩm nang mô tả video YouTube chuyên sâu dài 480-600 từ (chia 4-5 đoạn bằng \\n\\n, văn bản thuần không HTML, không tự chèn URL).
-   - "tags": Chuỗi 8-12 từ khóa ngăn cách bởi dấu phẩy.
-
-Trả về đúng JSON với 5 khóa:
-- "short_location_name": chuỗi
-- "title": chuỗi
-- "scenes": mảng ĐÚNG 21 object [{{"web_image_index": số_nguyên_hoặc_-1, "search_query_vi": "Cụm từ khóa tìm ảnh thật 5-10 từ khớp câu nói", "caption": "Dòng tiêu đề phụ đề 5-10 từ", "narration": "Đoạn lời bình 19-23 từ của biên tập viên"}}]
-- "description": chuỗi
-- "tags": chuỗi"""
-
         ckpt = (read_status_json().get(article["url"]) or {}).get("yt_checkpoint") or {}
-        if ckpt.get("res1") and isinstance(ckpt.get("res1"), dict) and ckpt["res1"].get("scenes"):
-            print("Resuming Chapter 1 from saved checkpoint in status.json!")
-            res1 = ckpt["res1"]
+
+        # Micro-Chunk 1: Lightweight SEO Metadata (~5s, ~500 output tokens)
+        if ckpt.get("seo_meta") and isinstance(ckpt.get("seo_meta"), dict) and ckpt["seo_meta"].get("title"):
+            print("Resuming YouTube SEO Metadata from checkpoint!")
+            seo_meta = ckpt["seo_meta"]
         else:
-            res1 = call_gemini_json(prompt_ch1, key_offset=2)
-            if not isinstance(res1, dict):
-                res1 = {}
-            ckpt["res1"] = res1
+            prompt_seo = f"""{base}
+
+NHIỆM VỤ BƯỚC 1 (SOẠN BỘ METADATA SEO YOUTUBE CHUYÊN SÂU):
+1. "short_location_name": Tên địa điểm cốt lõi có dấu (3-6 từ, VD: "Đền Cặp Tiên Vân Đồn").
+2. "title": Tiêu đề video YouTube hấp dẫn, chuẩn SEO (50-85 ký tự).
+3. "description": Bài cẩm nang mô tả video YouTube chuyên sâu dài 480-580 từ (chia 4-5 đoạn bằng \\n\\n, văn bản thuần không HTML, không tự chèn URL).
+4. "tags": Chuỗi 8-12 từ khóa ngăn cách bởi dấu phẩy.
+
+Trả về đúng JSON với 4 khóa: "short_location_name", "title", "description", "tags"."""
+            seo_meta = call_gemini_json(prompt_seo, key_offset=0)
+            if not isinstance(seo_meta, dict):
+                seo_meta = {}
+            ckpt["seo_meta"] = seo_meta
             update_status_json(article["url"], "yt_checkpoint", ckpt)
 
-        scenes_ch1 = [s for s in (res1.get("scenes") or []) if isinstance(s, dict) and str(s.get("narration", "")).strip()]
-        used_web_in_ch1 = {s.get("web_image_index") for s in scenes_ch1 if isinstance(s.get("web_image_index"), int) and s.get("web_image_index") >= 0}
-        remaining_web_str = ", ".join(str(i) for i in range(len(web_items)) if i not in used_web_in_ch1) or "Không còn"
+        # Shared strict photo search rules for all 4 scene micro-chunks
+        photo_rules = f"""QUY TẮC GÁN ẢNH THẬT KHỚP 100% VỚI TỪNG CÂU VOICE (CHỈ DÙNG 100% ẢNH CHỤP THẬT TẠI ĐỊA ĐIỂM):
+- Với cảnh khớp trực tiếp với một tấm ảnh gốc bài web được phép dùng trong phần này (mỗi tấm chỉ dùng ĐÚNG 1 LẦN DUY NHẤT): Đặt `"web_image_index": số_nguyên`.
+- Với tất cả các cảnh còn lại (đặt `"web_image_index": -1`), BẮT BUỘC viết `"search_query_vi"`: Cụm từ khóa tìm kiếm Google Maps / Google Hình Ảnh bằng Tiếng Việt thật cụ thể (5-10 từ) mô tả ĐÚNG ĐỊA DANH / DI TÍCH / VỊNH BIỂN / LỄ VẬT / ĐIỂM THAM QUAN tại Việt Nam đang được nói trong câu "narration" của cảnh đó!
+- CẤM TUYỆT ĐỐI tìm vật liệu xây dựng hay đồ vật rời rạc (CẤM tìm 'ngói mũi hài', 'gỗ lim', 'gạch', 'đá xanh', 'chai nhựa', 'can nước', 'vách núi đá') vì sẽ ra ảnh shop bán hàng hoặc núi Trung Quốc! Mọi cụm `"search_query_vi"` của 10 cảnh phải KHÁC NHAU 100% và luôn gắn rõ tên địa danh tại Việt Nam."""
 
-        prompt_ch2 = f"""{base}
+        chunk_specs = [
+            (
+                "chunk_1",
+                1,
+                "CẢNH 1 ĐẾN CẢNH 10: MỞ ĐẦU, VỊ TRÍ ĐỊA LÝ, VỊNH BIỂN/CẢNH QUAN XUNG QUANH, LỊCH SỬ HÌNH THÀNH & SỰ TÍCH NHÂN VẬT THỜ PHỤNG",
+                "Khám phá mở đầu ấn tượng, vị trí địa lý cụ thể, khung cảnh thiên nhiên vịnh biển/cảng tàu xung quanh, lịch sử hình thành ngôi đền/di tích và câu chuyện sự tích nhân vật lịch sử được thờ phụng.",
+                [i for i in range(0, min(3, len(web_items)))],
+            ),
+            (
+                "chunk_2",
+                2,
+                "CẢNH 11 ĐẾN CẢNH 20: KHÁM PHÁ CHI TIẾT CỔNG ĐỀN, CẦU ĐÁ, KIẾN TRÚC CHÍNH ĐIỆN, CÁC BAN THỜ, ĐỘNG SƠN TRANG & GIẾNG TIÊN",
+                "Đi sâu miêu tả trực quan từng hạng mục kiến trúc từ ngoài vào trong: cổng tam quan, cầu đá, sân đền, kiến trúc chính điện, các ban thờ bên trong, khu vực Động Sơn Trang, Giếng Tiên và thế phong thủy.",
+                [i for i in range(3, min(7, len(web_items)))],
+            ),
+            (
+                "chunk_3",
+                3,
+                "CẢNH 21 ĐẾN CẢNH 30: LỄ HỘI TRUYỀN THỐNG, THỜI ĐIỂM ĐẸP NHẤT, GIỜ MỞ CỬA, LỘ TRÌNH DI CHUYỂN & HƯỚNG DẪN SẮM LỄ CHI TIẾT",
+                "Chia sẻ chi tiết về lễ hội truyền thống hằng năm, thời điểm đi lễ lý tưởng, giờ mở cửa, hướng dẫn lộ trình di chuyển (cao tốc, cầu, bến cảng) và hướng dẫn sắm lễ đầy đủ (lễ chay hương hoa ngũ quả, lễ mặn, lễ Sơn Trang, lễ ban Công Đồng).",
+                [i for i in range(7, min(10, len(web_items)))],
+            ),
+            (
+                "chunk_4",
+                4,
+                "CẢNH 31 ĐẾN CẢNH 40: KINH NGHIỆM XIN NƯỚC GIẾNG TIÊN, VĂN KHẤN, LƯU Ý TRANG PHỤC, ĐỊA ĐIỂM DU LỊCH LÂN CẬN & LỜI KẾT",
+                "Hướng dẫn trình tự dâng hương và đọc văn khấn, nghi thức xin nước Giếng Tiên cầu bình an, lưu ý trang phục ứng xử, gợi ý kết hợp tham quan các địa điểm nổi tiếng lân cận có trong bài (như Đền Cửa Ông, Chùa Cái Bầu, Bãi Dài Vân Đồn, Đảo Quan Lạn...) cùng đặc sản địa phương và lời chào kết.",
+                [i for i in range(10, len(web_items))],
+            ),
+        ]
 
-DANH SÁCH ẢNH GỐC BÀI WEB CÒN CHƯA DÙNG Ở CHƯƠNG 1 (CHỈ ĐƯỢC CHỌN TRONG CÁC SỐ NÀY: [{remaining_web_str}]):
+        all_chunks_scenes = []
+        used_web_global = set()
+        for ck_key, ck_idx, ck_title, ck_focus, allowed_web_list in chunk_specs:
+            saved_scenes = ckpt.get(ck_key)
+            if isinstance(saved_scenes, list) and len(saved_scenes) >= 8:
+                print(f"Resuming {ck_key} ({len(saved_scenes)} scenes) from checkpoint!")
+                chunk_scenes = saved_scenes
+            else:
+                avail_web = [i for i in allowed_web_list if i not in used_web_global]
+                avail_str = ", ".join(str(i) for i in avail_web) if avail_web else "Không dùng ảnh web ở phần này (đặt tất cả web_image_index = -1)"
+                prompt_ck = f"""{base}
+
+DANH SÁCH ẢNH GỐC BÀI WEB ĐƯỢC PHÉP CHỌN TRONG PHẦN NÀY (CHỈ ĐƯỢC CHỌN TRONG CÁC SỐ NÀY: [{avail_str}]):
 {web_catalog}
 
-NHIỆM VỤ PHẦN 2 CHO PHÓNG SỰ VIDEO [YOUTUBE HD TRÊN 5 PHÚT - CHƯƠNG 2 (21 PHÂN CẢNH TIẾP THEO: LỄ HỘI, ĐƯỜNG ĐI, SẮM LỄ, VĂN KHẤN & ĐỊA ĐIỂM LÂN CẬN)]:
-1. Tiếp nối Chương 1, hãy viết tiếp CHƯƠNG 2 gồm ĐÚNG 21 PHÂN CẢNH ("scenes"), mỗi phân cảnh có lời bình ("narration") dài 19-23 từ (~7.3 giây/cảnh):
-   - Khai thác sâu toàn diện nửa sau bài viết: Lễ hội truyền thống, thời điểm đi lễ đẹp nhất, giờ mở cửa, hướng dẫn lộ trình di chuyển (cao tốc, cầu, bến cảng), hướng dẫn chi tiết từng loại lễ vật khi sắm lễ (lễ chay hương hoa ngũ quả, lễ mặn, lễ Sơn Trang Cô Bé Cửa Suốt, lễ ban Công Đồng), kinh nghiệm xin nước Giếng Tiên và đọc văn khấn, lưu ý trang phục ứng xử, các địa điểm tham quan lân cận được nhắc trong bài (như Đền Cửa Ông, Chùa Cái Bầu, Bãi Dài Vân Đồn, Đảo Quan Lạn...) và lời kết.
-2. QUY TẮC GÁN ẢNH THẬT KHỚP 100% VỚI TỪNG CÂU VOICE (42 CẢNH = 42 BỨC ẢNH CHỤP THẬT KHÁC NHAU):
-   - Hãy sử dụng nốt các tấm ảnh gốc bài web còn lại trong danh sách `[{remaining_web_str}]` (mỗi tấm chỉ dùng đúng 1 lần ở cảnh phù hợp nhất, đặt `"web_image_index": số_nguyên`).
-   - Với tất cả các cảnh còn lại (đặt `"web_image_index": -1`), hãy viết `"search_query_vi"` (cụm từ khóa tìm ảnh chụp thật 5-10 từ trên Google/Bing khớp chính xác 100% với vật thể / địa điểm đang được nói trong câu "narration" của cảnh đó):
-     + Khi nói về lễ hội đền -> `"lễ hội đền Cặp Tiên Vân Đồn Quảng Ninh"`
-     + Khi nói về cao tốc Hạ Long Vân Đồn / đường đi -> `"cao tốc Hạ Long Vân Đồn Quảng Ninh"`, `"cầu Vân Tiên Vân Đồn Quảng Ninh"`
-     + Khi nói về sắm lễ chay (hoa tươi, trầu cau, ngũ quả) -> `"mâm lễ chay hoa tươi ngũ quả đi lễ đền chùa"`
-     + Khi nói về sắm lễ Sơn Trang / lễ Cô Bé -> `"mâm lễ Sơn Trang dâng hương truyền thống Việt Nam"`
-     + Khi nói về sắm lễ mặn / xôi gà / oản lễ -> `"mâm lễ xôi gà dâng lễ đền chùa Việt Nam"`
-     + Khi nói về nghi thức dâng hương / đọc văn khấn -> `"du khách thành tâm dâng hương tại đền cổ Việt Nam"`
-     + Khi nói về địa điểm tham quan lân cận (nếu bài nhắc Đền Cửa Ông, Chùa Cái Bầu, Bãi Dài...) -> ghi ĐÚNG tên địa điểm lân cận đó làm từ khóa tìm ảnh (VD: `"Đền Cửa Ông Cẩm Phả Quảng Ninh"`, `"Chùa Cái Bầu Thiền Viện Trúc Lâm Giác Tâm Vân Đồn"`, `"bãi biển Bãi Dài Vân Đồn Quảng Ninh"`).
-   - 21 phân cảnh phải có 21 cụm `"search_query_vi"` hoàn toàn khác nhau!
+NHIỆM VỤ PHẦN {ck_idx}/4 CHO PHÓNG SỰ VIDEO YOUTUBE HD TRÊN 5 PHÚT ({ck_title}):
+1. Hãy viết ĐÚNG 10 PHÂN CẢNH ("scenes") nối tiếp mạch phóng sự, mỗi phân cảnh có lời bình ("narration") dài 19-23 từ (~7.5 giây/cảnh):
+   - Nội dung trọng tâm của 10 cảnh này: {ck_focus}
+2. {photo_rules}
+   - Khi nói về địa điểm tham quan lân cận (VD: Đền Cửa Ông, Chùa Cái Bầu, Bãi Dài Vân Đồn...) hoặc lễ vật (mâm lễ chay hoa tươi ngũ quả, mâm lễ Sơn Trang, mâm lễ xôi gà) -> ghi ĐÚNG tên địa điểm lân cận / mâm lễ đó làm `"search_query_vi"`.
 
 Trả về đúng JSON với 1 khóa duy nhất:
-- "scenes": mảng ĐÚNG 21 object [{{"web_image_index": số_nguyên_hoặc_-1, "search_query_vi": "Cụm từ khóa tìm ảnh thật 5-10 từ khớp câu nói", "caption": "Dòng tiêu đề phụ đề 5-10 từ", "narration": "Đoạn lời bình 19-23 từ của biên tập viên"}}]"""
+- "scenes": mảng ĐÚNG 10 object [{{"web_image_index": số_nguyên_hoặc_-1, "search_query_vi": "Cụm từ khóa tìm ảnh thật 5-10 từ khớp câu nói", "caption": "Dòng tiêu đề phụ đề 5-10 từ", "narration": "Đoạn lời bình 19-23 từ của biên tập viên"}}]"""
+                ck_res = call_gemini_json(prompt_ck, key_offset=ck_idx)
+                raw_list = ck_res.get("scenes") if isinstance(ck_res, dict) else (ck_res if isinstance(ck_res, list) else [])
+                chunk_scenes = [s for s in (raw_list or []) if isinstance(s, dict) and str(s.get("narration", "")).strip()]
+                ckpt[ck_key] = chunk_scenes
+                update_status_json(article["url"], "yt_checkpoint", ckpt)
 
-        if ckpt.get("res2") and isinstance(ckpt.get("res2"), dict) and ckpt["res2"].get("scenes"):
-            print("Resuming Chapter 2 from saved checkpoint in status.json!")
-            res2 = ckpt["res2"]
-        else:
-            res2 = call_gemini_json(prompt_ch2, key_offset=4)
-            if not isinstance(res2, dict):
-                res2 = {}
-            ckpt["res2"] = res2
-            update_status_json(article["url"], "yt_checkpoint", ckpt)
+            for s in chunk_scenes:
+                w_idx = s.get("web_image_index")
+                if isinstance(w_idx, int) and 0 <= w_idx < len(web_items):
+                    if w_idx in used_web_global:
+                        s["web_image_index"] = -1
+                    else:
+                        used_web_global.add(w_idx)
+            all_chunks_scenes.append(chunk_scenes)
 
-        scenes_ch2 = [s for s in (res2.get("scenes") or []) if isinstance(s, dict) and str(s.get("narration", "")).strip()]
-
+        scenes_ch1 = (all_chunks_scenes[0] if len(all_chunks_scenes) > 0 else []) + (all_chunks_scenes[1] if len(all_chunks_scenes) > 1 else [])
+        scenes_ch2 = (all_chunks_scenes[2] if len(all_chunks_scenes) > 2 else []) + (all_chunks_scenes[3] if len(all_chunks_scenes) > 3 else [])
         all_scenes = scenes_ch1 + scenes_ch2
-        res1["scenes"] = all_scenes
-        res1["chapter1_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes_ch1) or f"Cùng khám phá {article['h1']}."
-        res1["chapter2_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes_ch2)
-        res1["speech_script"] = (res1["chapter1_speech"] + " " + res1["chapter2_speech"]).strip()
-        print(f"Generated 2-Chapter YouTube Script: Chapter 1 ({len(scenes_ch1)} scenes) + Chapter 2 ({len(scenes_ch2)} scenes) = {len(all_scenes)} total scenes!")
-        return res1
+
+        res_yt = dict(seo_meta)
+        res_yt["scenes"] = all_scenes
+        res_yt["chapter1_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes_ch1) or f"Cùng khám phá {article['h1']}."
+        res_yt["chapter2_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes_ch2)
+        res_yt["speech_script"] = (res_yt["chapter1_speech"] + " " + res_yt["chapter2_speech"]).strip()
+        print(f"Generated 4-Chunk YouTube Script: Chapter 1 ({len(scenes_ch1)} scenes) + Chapter 2 ({len(scenes_ch2)} scenes) = {len(all_scenes)} total scenes!")
+        return res_yt
 
     if channel == "bluesky":
         prompt = f"""{base}
@@ -1252,7 +1276,7 @@ def verify_photo_candidates_with_gemini_vision(candidates: list[dict], query_vi:
             "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
         }
         try:
-            r = requests.post(url, json=payload, timeout=35)
+            r = requests.post(url, json=payload, timeout=20)
             if r.status_code == 200:
                 txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
                 txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.I).strip()
