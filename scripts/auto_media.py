@@ -758,16 +758,10 @@ DANH SÁCH ẢNH GỐC CÓ SẴN TRONG BÀI VIẾT WEB (CHỈ SỐ TỪ 0 ĐẾN
 NHIỆM VỤ PHẦN 1 CHO PHÓNG SỰ VIDEO [YOUTUBE HD TRÊN 5 PHÚT - CHƯƠNG 1 (21 PHÂN CẢNH ĐẦU: VỊ TRÍ, LỊCH SỬ, SỰ TÍCH & KIẾN TRÚC CHI TIẾT)]:
 1. Hãy viết CHƯƠNG 1 của phóng sự gồm ĐÚNG 21 PHÂN CẢNH ("scenes"), mỗi phân cảnh có lời bình ("narration") dài 19-23 từ (~7.3 giây/cảnh):
    - Khai thác sâu toàn diện nửa đầu bài viết: Mở đầu ấn tượng, vị trí địa lý, khung cảnh thiên nhiên vùng đất/vịnh biển xung quanh, nguồn gốc lịch sử, sự tích / nhân vật lịch sử thờ phụng và đi sâu khám phá từng công trình kiến trúc (cổng đền, cầu đá, chính điện, ban thờ, động Sơn Trang, Giếng Tiên, thế phong thủy...).
-2. QUY TẮC GÁN ẢNH THẬT KHỚP 100% VỚI TỪNG CÂU VOICE (TUYỆT ĐỐI KHÔNG DÙNG ẢNH AI, CHỈ DÙNG 100% ẢNH CHỤP THẬT):
+2. QUY TẮC GÁN ẢNH THẬT KHỚP 100% VỚI TỪNG CÂU VOICE (TUYỆT ĐỐI KHÔNG DÙNG ẢNH AI, CHỈ DÙNG 100% ẢNH CHỤP THẬT TẠI ĐỊA ĐIỂM):
    - Với những cảnh khớp trực tiếp với một trong các tấm ảnh gốc bài web ở trên (ưu tiên dùng khoảng 7-8 tấm ảnh gốc từ chỉ số 0 đến {max_web_idx}, MỖI TẤM CHỈ DÙNG ĐÚNG 1 LẦN DUY NHẤT, không lặp lại chỉ số): Đặt `"web_image_index": số_nguyên` (0 đến {max_web_idx}).
-   - Với TẤT CẢ các cảnh còn lại (đặt `"web_image_index": -1`), bạn BẮT BUỘC viết `"search_query_vi"`: Cụm từ khóa tìm kiếm Google/Bing Hình Ảnh bằng Tiếng Việt thật cụ thể, chi tiết (5-10 từ) mô tả ĐÚNG ĐỊA DANH / CÔNG TRÌNH / CẢNH QUAN đang được đọc trong câu "narration" của cảnh đó!
-   - Ví dụ mẫu về "search_query_vi" cực chuẩn theo câu nói:
-     + Khi câu thoại nói về vịnh Bái Tử Long Vân Đồn -> `"vịnh Bái Tử Long Vân Đồn Quảng Ninh"`
-     + Khi câu thoại nói về thương cảng Vân Đồn xưa / bến Cái Rồng -> `"cảng Cái Rồng Vân Đồn Quảng Ninh"`
-     + Khi câu thoại nói về danh tướng Trần Khánh Dư -> `"đền thờ tượng Trần Khánh Dư Vân Đồn"`
-     + Khi câu thoại nói về cổng đền / lối vào đền -> `"cổng đền Cặp Tiên Vân Đồn Quảng Ninh"`
-     + Khi câu thoại nói về Giếng Tiên / mạch nước ngầm -> `"Giếng Tiên đền Cặp Tiên Vân Đồn"`
-     + Khi câu thoại nói về không gian thờ Mẫu / tứ phủ -> `"không gian ban thờ Mẫu tam tứ phủ Việt Nam"`
+   - Với TẤT CẢ các cảnh còn lại (đặt `"web_image_index": -1`), bạn BẮT BUỘC viết `"search_query_vi"`: Cụm từ khóa tìm kiếm Google Maps / Google Hình Ảnh bằng Tiếng Việt thật cụ thể (5-10 từ) mô tả ĐÚNG ĐỊA DANH / DI TÍCH / VỊNH BIỂN / CẢNG TÀU tại Việt Nam đang được đọc trong câu "narration" của cảnh đó!
+   - CẤM TUYỆT ĐỐI: Không bao giờ được đặt từ khóa tìm các vật liệu xây dựng hay đồ vật rời rạc (CẤM tìm 'ngói mũi hài', 'gỗ lim', 'gạch', 'đá xanh', 'chai nhựa', 'can nước', 'vách núi đá') vì sẽ ra ảnh shop bán hàng hoặc ảnh núi Trung Quốc! Mọi cụm `"search_query_vi"` BẮT BUỘC phải chứa tên địa danh cụ thể ở Việt Nam (VD: `"Đền Cặp Tiên Vân Đồn Quảng Ninh"`, `"vịnh Bái Tử Long Vân Đồn Quảng Ninh"`, `"cảng Cái Rồng Vân Đồn Quảng Ninh"`, `"đền thờ Trần Khánh Dư Vân Đồn"`, `"cổng đền Cặp Tiên Vân Đồn"`, `"Giếng Tiên đền Cặp Tiên Quảng Ninh"`, `"khu di tích lịch sử Vân Đồn Quảng Ninh"`).
    - LƯU Ý: 21 phân cảnh phải có 21 cụm `"search_query_vi"` KHÁC NHAU (mỗi cảnh tìm 1 góc nhìn/chi tiết cụ thể khác nhau để 21 bức ảnh hoàn toàn không trùng lặp!).
 3. Đồng thời viết bộ SEO YouTube:
    - "short_location_name": Tên địa điểm cốt lõi có dấu (3-6 từ).
@@ -1204,57 +1198,158 @@ def build_youtube_thumbnail_1280x720(image_urls: list[str], yt_title: str, short
     return t_url
 
 
-def search_and_download_scene_real_photo(query_vi: str, short_loc: str, used_urls: set, used_hashes: list[int]):
-    """Search Bing Images for a scene-specific Vietnamese query and return a 100% unique, clean real photograph (PIL.Image, url)."""
+def verify_photo_candidates_with_gemini_vision(candidates: list[dict], query_vi: str, cap: str, short_loc: str, scene_idx: int) -> int:
+    """Have Gemini Vision inspect 2-3 candidate photos for a scene and return index of the cleanest photo (0 watermark, 0 shop text, 0 Chinese cliff temple)."""
+    if not candidates:
+        return -1
+    parts = [
+        {
+            "text": (
+                f"Bạn là Kiểm duyệt viên Hình ảnh cho phóng sự du lịch Việt Nam về '{short_loc}'.\n"
+                f"Phân cảnh hiện tại: '{cap}' (Từ khóa: '{query_vi}').\n"
+                f"Dưới đây là {len(candidates)} bức ảnh ứng viên đánh số từ 0 đến {len(candidates)-1}.\n"
+                "Hãy NHÌN KỸ TỪNG BỨC ẢNH và LOẠI BỎ NGAY những ảnh mắc 1 trong các lỗi sau:\n"
+                "- Có gắn logo hình mờ (watermark) của báo chí, trang web, fanpage hoặc cửa hàng ở góc/giữa ảnh.\n"
+                "- Có chữ quảng cáo, số điện thoại (09..., 08...), mã sản phẩm (Mã:...), bảng giá, khung chữ banner.\n"
+                "- Là ảnh chụp sản phẩm buôn bán rời rạc (ngói, gạch, gốm sứ, chai lọ) hoặc ảnh bản đồ/văn bản.\n"
+                "- Là ảnh núi non/chùa chiền Trung Quốc (như chùa treo vách núi đá dựng đứng kiểu Trung Quốc) hoặc ảnh giả tưởng AI.\n\n"
+                "Hãy chọn ra 1 bức ảnh SẠCH NHẤT, ĐẸP NHẤT, ĐÚNG VỚI PHONG CẢNH/VĂN HÓA VIỆT NAM NHẤT.\n"
+                "Trả về đúng JSON: {\"best_index\": số_nguyên_từ_0_đến_N_hoặc_-1_nếu_tất_cả_đều_xấu}"
+            )
+        }
+    ]
+    for c_i, c in enumerate(candidates):
+        parts.append({"text": f"--- ỨNG VIÊN #{c_i} ---"})
+        parts.append({"inlineData": {"mimeType": "image/jpeg", "data": c["b64"]}})
+
+    models = [
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3-flash-preview",
+        "gemini-3.5-flash-lite",
+        "gemini-flash-lite-latest",
+    ]
+    for m_idx, model in enumerate(models):
+        key = GEMINI_KEYS[(scene_idx + m_idx) % len(GEMINI_KEYS)]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+        }
+        try:
+            r = requests.post(url, json=payload, timeout=35)
+            if r.status_code == 200:
+                txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.I).strip()
+                parsed = json.loads(txt)
+                if isinstance(parsed, dict):
+                    b_idx = parsed.get("best_index", 0)
+                    if isinstance(b_idx, int) and -1 <= b_idx < len(candidates):
+                        return b_idx
+                return 0
+        except Exception:
+            continue
+    return 0
+
+
+def search_and_download_scene_real_photo(query_vi: str, short_loc: str, used_urls: set, used_hashes: list[int], cap: str = "", scene_idx: int = 0):
+    """Search Google Images (including Google Maps lh3 visitor photos) + Bing Images, then inspect top 3 candidates with Gemini Vision to pick a 100% watermark-free, authentic photo."""
     import io
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     b_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
     }
     bad_patterns = re.compile(
-        r"dulichcheckin\.com|logo|icon|avatar|banner|shopee|lazada|tiki|tiktok|sendo|map|bando|chart|poster|flyer|infographic|\.svg|\.gif",
+        r"dulichcheckin\.com|logo|icon|avatar|banner|shopee|lazada|tiki|tiktok|sendo|alibaba|taobao|1688|vatgia|map|bando|chart|poster|flyer|infographic|gom|gach|ngoi|vlxd|\.svg|\.gif",
         re.I,
     )
 
-    search_variants = [query_vi.strip()]
-    if short_loc.lower() not in query_vi.lower():
-        search_variants.append(f"{query_vi.strip()} {short_loc}")
-    search_variants.append(f"{short_loc} du lịch danh thắng Việt Nam")
+    # Sanitize query: strip building material keywords that trigger e-commerce catalog listings
+    clean_q = re.sub(r"\b(?:ngói\s+mũi\s+hài|gạch\s+gốm|gỗ\s+lim|can\s+nhựa|chai\s+lọ|vật\s+liệu)\b", "", query_vi, flags=re.I).strip()
+    if len(clean_q) < 6:
+        clean_q = f"kiến trúc {short_loc}"
+
+    search_variants = [
+        f"{clean_q} Việt Nam",
+        f"{clean_q} {short_loc}",
+        f"du lịch {short_loc} Quảng Ninh",
+    ]
 
     for q in search_variants:
-        if not q:
-            continue
+        candidate_urls = []
+        # 1. Google Images (udm=2) + Google Maps Place Photos (lh3.googleusercontent.com)
+        try:
+            g_url = f"https://www.google.com/search?q={urllib.parse.quote(q)}&udm=2&hl=vi"
+            gr = requests.get(g_url, headers=b_headers, timeout=8)
+            if gr.status_code == 200:
+                # Extract Google Maps / Google Place user photos first (highest priority!)
+                lh_matches = re.findall(r"(https://lh[35]\.googleusercontent\.com/(?:p|gps-cs-s)/[A-Za-z0-9_-]{25,})", gr.text)
+                for lhu in lh_matches:
+                    full_lhu = f"{lhu}=w1280-h720-k-no"
+                    if full_lhu not in used_urls and full_lhu not in candidate_urls:
+                        candidate_urls.append(full_lhu)
+                # Extract standard high-res image URLs from Google Images results
+                g_imgs = re.findall(r'\["(https?://[^"\'<>\\\s]+\.(?:jpg|jpeg|png))",\d+,\d+\]', gr.text, flags=re.I)
+                for gu in g_imgs:
+                    u = gu.encode("utf-8").decode("unicode_escape", errors="ignore") if "\\u" in gu else gu
+                    if u not in used_urls and u not in candidate_urls and not bad_patterns.search(u) and "gstatic.com" not in u:
+                        candidate_urls.append(u)
+        except Exception:
+            pass
+
+        # 2. Bing Images supplemental candidates
         try:
             b_url = f"https://www.bing.com/images/search?q={urllib.parse.quote(q)}&form=HDRSC2&first=1"
             r = requests.get(b_url, headers=b_headers, timeout=8)
-            if r.status_code != 200:
-                continue
-            matches = re.findall(r"murl&quot;:&quot;(https?://[^&]+?\.(?:jpg|jpeg|png|webp))&quot;", r.text, flags=re.I)
-            for mu in matches[:14]:
-                u = html.unescape(mu).strip()
-                if u in used_urls or bad_patterns.search(u):
-                    continue
-                try:
-                    ir = requests.get(u, headers=b_headers, timeout=6)
-                    if ir.status_code == 200 and len(ir.content) > 10000:
-                        im = Image.open(io.BytesIO(ir.content)).convert("RGB")
-                        w, h = im.size
-                        if w < 460 or h < 280 or (w / float(h)) > 2.6 or (h / float(w)) > 1.9:
-                            continue
-                        if has_bottom_title_banner(im):
-                            continue
-                        ah = compute_image_ahash(im)
-                        if is_near_duplicate_hash(ah, used_hashes, max_dist=6):
-                            continue
-                        used_urls.add(u)
-                        used_hashes.append(ah)
-                        return im, u
-                except Exception:
-                    continue
+            if r.status_code == 200:
+                matches = re.findall(r"murl&quot;:&quot;(https?://[^&]+?\.(?:jpg|jpeg|png|webp))&quot;", r.text, flags=re.I)
+                for mu in matches[:16]:
+                    u = html.unescape(mu).strip()
+                    if u not in used_urls and u not in candidate_urls and not bad_patterns.search(u):
+                        candidate_urls.append(u)
         except Exception:
-            continue
+            pass
+
+        # Download top 3 valid distinct candidates for this scene and run Gemini Vision verification!
+        valid_cands = []
+        for u in candidate_urls[:18]:
+            if len(valid_cands) >= 3:
+                break
+            try:
+                ir = requests.get(u, headers=b_headers, timeout=6)
+                if ir.status_code == 200 and len(ir.content) > 10000:
+                    im = Image.open(io.BytesIO(ir.content)).convert("RGB")
+                    w, h = im.size
+                    if w < 480 or h < 280 or (w / float(h)) > 2.5 or (h / float(w)) > 1.85:
+                        continue
+                    if has_bottom_title_banner(im):
+                        continue
+                    ah = compute_image_ahash(im)
+                    if is_near_duplicate_hash(ah, used_hashes, max_dist=6) or any((ah ^ vc["ah"]).bit_count() <= 6 for vc in valid_cands):
+                        continue
+                    thumb = ImageOps.contain(im, (300, 188), method=Image.Resampling.BILINEAR)
+                    buf = io.BytesIO()
+                    thumb.save(buf, format="JPEG", quality=70)
+                    valid_cands.append({
+                        "im": im,
+                        "url": u,
+                        "ah": ah,
+                        "b64": base64.b64encode(buf.getvalue()).decode("ascii"),
+                    })
+            except Exception:
+                continue
+
+        if valid_cands:
+            best_i = verify_photo_candidates_with_gemini_vision(valid_cands, clean_q, cap or clean_q, short_loc, scene_idx)
+            if best_i >= 0 and best_i < len(valid_cands):
+                chosen = valid_cands[best_i]
+                used_urls.add(chosen["url"])
+                used_hashes.append(chosen["ah"])
+                return chosen["im"], chosen["url"]
     return None, ""
 
 
@@ -1310,11 +1405,11 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
                 except Exception:
                     pass
 
-        # 2. If scene needs an external photo (or web_idx was -1 / already used), search Bing Images for this scene's exact query!
+        # 2. If scene needs an external photo (or web_idx was -1 / already used), search Google Maps/Images + Bing & verify with Gemini Vision!
         if raw_im is None and search_q:
-            raw_im, ext_u = search_and_download_scene_real_photo(search_q, short_loc, used_urls, used_hashes)
+            raw_im, ext_u = search_and_download_scene_real_photo(search_q, short_loc, used_urls, used_hashes, cap=cap, scene_idx=idx)
             if raw_im is not None:
-                chosen_url = f"[SEARCH: '{search_q}'] {ext_u}"
+                chosen_url = f"[VISION_VERIFIED_SEARCH: '{search_q}'] {ext_u}"
 
         # 3. Fallback: pick any remaining unused photo from image_urls pool
         if raw_im is None:
@@ -1340,7 +1435,7 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
 
         # 4. Last-resort search with caption + short_loc if pool is exhausted
         if raw_im is None:
-            raw_im, ext_u = search_and_download_scene_real_photo(f"{cap} {short_loc}", short_loc, used_urls, used_hashes)
+            raw_im, ext_u = search_and_download_scene_real_photo(f"{cap} {short_loc}", short_loc, used_urls, used_hashes, cap=cap, scene_idx=idx)
             if raw_im is not None:
                 chosen_url = f"[CAPTION_SEARCH: '{cap}'] {ext_u}"
 
