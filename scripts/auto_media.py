@@ -297,9 +297,9 @@ def mix_studio_bgm_into_pcm(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes
     return out_arr.tobytes()
 
 
-def call_gemini_tts_to_mp3(speech_script: str, style_direction: str, out_mp3: Path, key_offset: int = 0) -> float:
+def call_gemini_tts_raw_pcm(speech_script: str, style_direction: str, key_offset: int = 0) -> tuple[bytes, int]:
+    """Generate raw 16-bit mono PCM audio bytes + sample_rate from Gemini 2.5 Flash TTS (voice Aoede)."""
     full_prompt = f"{style_direction}\n\n{speech_script}"
-    # Prioritize gemini-2.5-flash-preview-tts (approved best natural Vietnamese broadcaster voice!)
     tts_models = ["gemini-2.5-flash-preview-tts", "gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
     last_err = ""
     for m_name in tts_models:
@@ -318,49 +318,67 @@ def call_gemini_tts_to_mp3(speech_script: str, style_direction: str, out_mp3: Pa
                 },
             }
             try:
-                r = requests.post(url, json=payload, timeout=120)
+                r = requests.post(url, json=payload, timeout=135)
                 if r.status_code == 200:
                     inline = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
                     mime = inline.get("mimeType", "audio/L16;codec=pcm;rate=24000")
                     sr_m = re.search(r"rate=(\d+)", mime)
                     sample_rate = int(sr_m.group(1)) if sr_m else 24000
                     pcm_bytes = base64.b64decode(inline["data"])
-
-                    # Mix warm broadcast studio filter + gentle background music (1.2s intro + ducked BGM + 1.8s outro)
-                    mixed_pcm = mix_studio_bgm_into_pcm(pcm_bytes, sample_rate)
-
-                    raw_pcm = out_mp3.with_suffix(".pcm")
-                    raw_pcm.write_bytes(mixed_pcm)
-
-                    subprocess.run(
-                        [
-                            "ffmpeg", "-y",
-                            "-f", "s16le", "-ar", str(sample_rate), "-ac", "1",
-                            "-i", str(raw_pcm),
-                            "-codec:a", "libmp3lame", "-b:a", "128k",
-                            str(out_mp3),
-                        ],
-                        check=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    raw_pcm.unlink(missing_ok=True)
-                    probe = subprocess.check_output(
-                        [
-                            "ffprobe", "-v", "error",
-                            "-show_entries", "format=duration",
-                            "-of", "default=noprint_wrappers=1:nokey=1",
-                            str(out_mp3),
-                        ],
-                        text=True,
-                    ).strip()
-                    return float(probe)
+                    return pcm_bytes, sample_rate
                 last_err = f"HTTP {r.status_code} ({m_name}): {r.text[:200]}"
                 if r.status_code in (429, 503):
                     time.sleep(2)
             except Exception as e:
                 last_err = str(e)
     raise RuntimeError(f"Gemini TTS failed: {last_err}")
+
+
+def finalize_pcm_to_mp3_with_bgm(pcm_bytes: bytes, sample_rate: int, out_mp3: Path) -> float:
+    mixed_pcm = mix_studio_bgm_into_pcm(pcm_bytes, sample_rate)
+    raw_pcm = out_mp3.with_suffix(".pcm")
+    raw_pcm.write_bytes(mixed_pcm)
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "s16le", "-ar", str(sample_rate), "-ac", "1",
+            "-i", str(raw_pcm),
+            "-codec:a", "libmp3lame", "-b:a", "128k",
+            str(out_mp3),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    raw_pcm.unlink(missing_ok=True)
+    probe = subprocess.check_output(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(out_mp3),
+        ],
+        text=True,
+    ).strip()
+    return float(probe)
+
+
+def call_gemini_tts_to_mp3(speech_script: str, style_direction: str, out_mp3: Path, key_offset: int = 0) -> float:
+    pcm_bytes, sample_rate = call_gemini_tts_raw_pcm(speech_script, style_direction, key_offset=key_offset)
+    return finalize_pcm_to_mp3_with_bgm(pcm_bytes, sample_rate, out_mp3)
+
+
+def call_gemini_tts_two_chapters_to_mp3(ch1_script: str, ch2_script: str, style_direction: str, out_mp3: Path, key_offset: int = 3) -> float:
+    """Read a ~4.5-5 minute script in 2 chapters and merge seamlessly over one continuous Studio BGM track."""
+    pcm1, sr1 = call_gemini_tts_raw_pcm(ch1_script, style_direction, key_offset=key_offset)
+    if not ch2_script.strip():
+        return finalize_pcm_to_mp3_with_bgm(pcm1, sr1, out_mp3)
+    pcm2, _ = call_gemini_tts_raw_pcm(ch2_script, style_direction, key_offset=key_offset + 1)
+    # 0.85s natural breath pause between Chapter 1 and Chapter 2
+    pause_samples = int(sr1 * 0.85)
+    pause_bytes = b"\x00\x00" * pause_samples
+    combined_pcm = pcm1 + pause_bytes + pcm2
+    return finalize_pcm_to_mp3_with_bgm(combined_pcm, sr1, out_mp3)
 
 
 def enforce_spotify_html_link(raw_html: str, article_url: str, short_loc: str) -> str:
@@ -550,16 +568,51 @@ Trả về đúng JSON với 5 khóa:
         return res
 
     if channel == "youtube":
+        img_items = article.get("image_items") or []
+        img_catalog = "\n".join(
+            f"- Ảnh #{idx} [{'ẢNH GỐC BÀI WEB - CHUẨN 100%' if 'dulichcheckin.com' in str(it.get('url', '')) else 'ẢNH NGOÀI - CHỈ CHỌN NẾU ĐÚNG ĐỊA ĐIỂM/TỈNH THÀNH'}]: {it.get('desc') or 'Hình ảnh thực tế'}"
+            for idx, it in enumerate(img_items)
+        )
         prompt = f"""{base}
 
-NHIỆM VỤ RIÊNG CHO VIDEO [YOUTUBE HD - TIÊU ĐỀ CTR CAO & BÀI MÔ TẢ SEO 500 TỪ]:
-- "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
-- "title": Tiêu đề video YouTube hấp dẫn, chuẩn SEO, có dấu tiếng Việt (50-85 ký tự, cấu trúc khác hoàn toàn tiêu đề bài gốc và Dailymotion).
-- "description": Bài cẩm nang mô tả video YouTube chuyên sâu dài khoảng 450-600 từ (chia 4-5 đoạn văn rõ ràng bằng \\n\\n, văn bản thuần KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL vì hệ thống sẽ tự đặt link trần chuẩn SEO). Đi sâu phân tích trải nghiệm, lịch sử/kiến trúc, kinh nghiệm di chuyển và lưu ý thực tế từ bài gốc.
-- "tags": Chuỗi 8-12 từ khóa tiếng Việt chuẩn SEO YouTube ngăn cách bởi dấu phẩy.
+DANH SÁCH ẢNH CỦA ĐỊA ĐIỂM (ƯU TIÊN SỐ 1 ẢNH GỐC BÀI WEB, KIỂM DUYỆT NGHIÊM NGẶT ẢNH NGOÀI):
+{img_catalog}
 
-Trả về đúng JSON với 4 khóa: "short_location_name", "title", "description", "tags"."""
-        return call_gemini_json(prompt, key_offset=3)
+NHIỆM VỤ RIÊNG CHO VIDEO CHUYÊN SÂU [YOUTUBE HD 4.5 - 5 PHÚT (KỊCH BẢN RIÊNG 2 CHƯƠNG & KIỂM DUYỆT ẢNH)]:
+1. KỊCH BẢN THUYẾT MINH CHUYÊN SÂU DÀI KHOẢNG 620 - 740 TỪ (~4.5 - 5 PHÚT), KHÁC HOÀN TOÀN KỊCH BẢN DAILYMOTION:
+   - Chia thành 18 đến 22 phân cảnh nối tiếp nhau ("scenes").
+   - Nửa đầu (Cảnh 1 đến Cảnh 10): Mở đầu cuốn hút, giới thiệu vị trí, nguồn gốc lịch sử, sự tích, truyền thuyết và đi sâu phân tích kiến trúc, không gian cảnh quan đặc sắc nhất từ bài gốc.
+   - Nửa sau (Cảnh 11 đến hết): Cẩm nang trải nghiệm thực tế toàn diện từ bài gốc (giờ mở cửa, giá vé, thời điểm đẹp nhất, hướng dẫn di chuyển, kinh nghiệm đi lễ/tham quan, ẩm thực đặc sản và những lưu ý quan trọng).
+   - Mỗi phân cảnh có lời bình ("narration") dài khoảng 30-36 từ, viết theo lối Biên tập viên truyền hình ngọt ngào, truyền cảm, chủ động dùng dấu phẩy (,) và gạch ngang (—) để ngắt nhịp.
+2. QUY TẮC KIỂM DUYỆT & CHỌN ẢNH CHO TỪNG CẢNH:
+   - Với các tấm [ẢNH NGOÀI]: Hãy đọc kỹ mô tả của nó. Nếu tấm ảnh ngoài nào bị lệch sang địa điểm khác hoặc tỉnh thành khác thì TUYỆT ĐỐI LOẠI BỎ, KHÔNG CHỌN chỉ số của ảnh đó!
+   - Hãy khai thác tối đa toàn bộ các tấm [ẢNH GỐC BÀI WEB - CHUẨN 100%]. Ở nửa sau video (từ Cảnh 11 trở đi), bạn ĐƯỢC PHÉP chọn lại các tấm [ẢNH GỐC BÀI WEB] phù hợp với nội dung (hệ thống sẽ tự động chuyển sang góc máy Cận Cảnh Close-up cho lần xuất hiện thứ 2 để hình ảnh luôn mới mẻ và đúng chuẩn 100% địa điểm thật!).
+3. "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
+4. "title": Tiêu đề video YouTube hấp dẫn, chuẩn SEO, có dấu tiếng Việt (50-85 ký tự, cấu trúc khác hoàn toàn tiêu đề bài gốc và Dailymotion).
+5. "description": Bài cẩm nang mô tả video YouTube chuyên sâu dài khoảng 480-620 từ (chia 4-5 đoạn văn rõ ràng bằng \\n\\n, văn bản thuần KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL).
+6. "tags": Chuỗi 8-12 từ khóa tiếng Việt chuẩn SEO YouTube ngăn cách bởi dấu phẩy.
+
+Trả về đúng JSON với 5 khóa:
+- "short_location_name": chuỗi
+- "title": chuỗi
+- "scenes": mảng 18-22 object [{{"image_index": số_nguyên, "caption": "Dòng tiêu đề phụ đề 5-10 từ hiện trên màn hình", "narration": "Đoạn lời bình 30-36 từ của biên tập viên"}}]
+- "description": chuỗi
+- "tags": chuỗi"""
+        res = call_gemini_json(prompt, key_offset=3)
+        if not isinstance(res, dict):
+            res = {}
+        scenes = [s for s in (res.get("scenes") or []) if isinstance(s, dict) and str(s.get("narration", "")).strip()]
+        res["scenes"] = scenes
+        if scenes:
+            mid = max(1, len(scenes) // 2)
+            res["chapter1_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes[:mid])
+            res["chapter2_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes[mid:])
+            res["speech_script"] = (res["chapter1_speech"] + " " + res["chapter2_speech"]).strip()
+        else:
+            res["chapter1_speech"] = f"Cùng khám phá {article['h1']}."
+            res["chapter2_speech"] = ""
+            res["speech_script"] = res["chapter1_speech"]
+        return res
 
     if channel == "bluesky":
         prompt = f"""{base}
@@ -818,17 +871,24 @@ def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: s
     return feed_url
 
 
-def render_tv_frame_1280x720(raw_im, caption_text: str, short_loc: str, scene_num: int, total_scenes: int):
-    """Render 100% uncropped image on a blurred matching backdrop with 3D shadow frame & TV lower-third caption bar."""
+def render_tv_frame_1280x720(raw_im, caption_text: str, short_loc: str, scene_num: int, total_scenes: int, zoom_center: bool = False):
+    """Render 100% uncropped image on a blurred matching backdrop with 3D shadow frame & TV lower-third caption bar (no top brand badge)."""
     from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
+    work_im = raw_im
+    if zoom_center:
+        # Subtle 12% center focus perspective for second appearance of authentic article photo
+        iw, ih = raw_im.size
+        if iw > 300 and ih > 200:
+            work_im = raw_im.crop((int(iw * 0.06), int(ih * 0.06), int(iw * 0.94), int(ih * 0.94)))
+
     # 1. Blurred full-screen 1280x720 backdrop from the image itself
-    bg = ImageOps.fit(raw_im, (1280, 720), method=Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(26))
+    bg = ImageOps.fit(work_im, (1280, 720), method=Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(26))
     bg = ImageEnhance.Brightness(bg).enhance(0.50)
     canvas = bg.convert("RGBA")
 
     # 2. 100% UNCROPPED foreground photo (contain inside 1140x565 area above the caption bar)
-    fg = ImageOps.contain(raw_im, (1140, 565), method=Image.Resampling.LANCZOS)
+    fg = ImageOps.contain(work_im, (1140, 565), method=Image.Resampling.LANCZOS)
     fw, fh = fg.size
     fx = (1280 - fw) // 2
     fy = 24 + (575 - fh) // 2
@@ -844,12 +904,10 @@ def render_tv_frame_1280x720(raw_im, caption_text: str, short_loc: str, scene_nu
     cdraw.rounded_rectangle([fx - 4, fy - 4, fx + fw + 4, fy + fh + 4], radius=6, fill=(255, 255, 255, 245))
     canvas.paste(fg.convert("RGBA"), (fx, fy))
 
-    # 4. Sleek TV Lower-Third Caption Bar + Top-Right Brand Badge
+    # 4. Sleek TV Lower-Third Caption Bar (No top brand badge!)
     ui_layer = Image.new("RGBA", (1280, 720), (0, 0, 0, 0))
     udraw = ImageDraw.Draw(ui_layer)
 
-    # Top-right subtle brand pill
-    udraw.rounded_rectangle([1015, 18, 1254, 54], radius=18, fill=(15, 23, 42, 195), outline=(254, 240, 138, 180), width=2)
     # Bottom lower-third banner
     udraw.rounded_rectangle([60, 622, 1220, 702], radius=12, fill=(15, 23, 42, 220), outline=(56, 189, 248, 200), width=2)
     udraw.rounded_rectangle([60, 622, 72, 702], radius=6, fill=(250, 204, 21, 255))
@@ -862,12 +920,10 @@ def render_tv_frame_1280x720(raw_im, caption_text: str, short_loc: str, scene_nu
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     ]
     font_path = next((p for p in font_paths if os.path.exists(p)), None)
-    f_badge = ImageFont.truetype(font_path, 19) if font_path else ImageFont.load_default()
     f_loc = ImageFont.truetype(font_path, 18) if font_path else ImageFont.load_default()
     f_cap = ImageFont.truetype(font_path, 26) if font_path else ImageFont.load_default()
 
-    fdraw.text((1134, 36), "dulichcheckin.com", fill=(254, 240, 138, 255), font=f_badge, anchor="mm")
-    loc_header = f"DU LỊCH CHECKIN  •  {short_loc.upper()} ({scene_num}/{total_scenes})"[:65]
+    loc_header = f"{short_loc.upper()}  •  ({scene_num}/{total_scenes})"[:65]
     fdraw.text((92, 642), loc_header, fill=(125, 211, 252, 255), font=f_loc, anchor="lm")
     clean_cap = (caption_text or short_loc)[:68]
     fdraw.text((92, 676), clean_cap, fill=(255, 255, 255, 255), font=f_cap, anchor="lm")
@@ -875,7 +931,69 @@ def render_tv_frame_1280x720(raw_im, caption_text: str, short_loc: str, scene_nu
     return canvas.convert("RGB")
 
 
-def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_sec: float, out_mp4: Path, scenes: list | None = None, short_loc: str = "Du lịch Việt Nam"):
+def build_youtube_thumbnail_1280x720(image_urls: list[str], yt_title: str, short_loc: str, out_jpg: Path) -> str:
+    """Create a 1280x720 HD YouTube Custom Thumbnail from the article's featured web image and upload to GitHub Release."""
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://dulichcheckin.com/",
+    }
+    src_im = None
+    for u in image_urls[:5]:
+        try:
+            r = requests.get(u, headers=headers, timeout=15)
+            if r.status_code == 200 and len(r.content) > 6000:
+                tmp_p = WORK_DIR / "yt_thumb_raw"
+                tmp_p.write_bytes(r.content)
+                src_im = Image.open(tmp_p).convert("RGB")
+                tmp_p.unlink(missing_ok=True)
+                break
+        except Exception:
+            continue
+
+    if src_im is None:
+        return ""
+
+    # Vibrant 1280x720 thumbnail: blurred backdrop + crisp large photo + bold lower title banner
+    enhanced = ImageEnhance.Color(ImageEnhance.Contrast(src_im).enhance(1.08)).enhance(1.12)
+    bg = ImageOps.fit(enhanced, (1280, 720), method=Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(22))
+    bg = ImageEnhance.Brightness(bg).enhance(0.55)
+    canvas = bg.convert("RGBA")
+
+    fg = ImageOps.contain(enhanced, (1210, 560), method=Image.Resampling.LANCZOS)
+    fw, fh = fg.size
+    fx = (1280 - fw) // 2
+    fy = 16 + (565 - fh) // 2
+
+    cdraw = ImageDraw.Draw(canvas)
+    cdraw.rounded_rectangle([fx - 5, fy - 5, fx + fw + 5, fy + fh + 5], radius=8, fill=(255, 255, 255, 250))
+    canvas.paste(fg.convert("RGBA"), (fx, fy))
+
+    ui = Image.new("RGBA", (1280, 720), (0, 0, 0, 0))
+    udraw = ImageDraw.Draw(ui)
+    udraw.rounded_rectangle([40, 594, 1240, 704], radius=14, fill=(15, 23, 42, 235), outline=(250, 204, 21, 230), width=3)
+    udraw.rounded_rectangle([40, 594, 54, 704], radius=7, fill=(250, 204, 21, 255))
+    canvas = Image.alpha_composite(canvas, ui)
+
+    fdraw = ImageDraw.Draw(canvas)
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    font_path = next((p for p in font_paths if os.path.exists(p)), None)
+    f_sub = ImageFont.truetype(font_path, 22) if font_path else ImageFont.load_default()
+    f_main = ImageFont.truetype(font_path, 32) if font_path else ImageFont.load_default()
+
+    fdraw.text((78, 622), f"KHÁM PHÁ & KINH NGHIỆM THỰC TẾ  •  {short_loc.upper()}"[:58], fill=(250, 204, 21, 255), font=f_sub, anchor="lm")
+    fdraw.text((78, 668), (yt_title or short_loc)[:56], fill=(255, 255, 255, 255), font=f_main, anchor="lm")
+
+    canvas.convert("RGB").save(out_jpg, "JPEG", quality=92)
+    t_url, _ = upload_mp3_to_github_release(out_jpg)
+    return t_url
+
+
+def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_sec: float, out_mp4: Path, scenes: list | None = None, short_loc: str = "Du lịch Việt Nam", max_scenes: int = 16):
     """Build a crisp 1280x720 HD video with 100% uncropped images, blurred backdrop, TV captions & smooth transitions."""
     from PIL import Image
 
@@ -884,7 +1002,7 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
         "Referer": "https://dulichcheckin.com/",
     }
 
-    # Build ordered list of (image_url, weight_words, caption_text) from Gemini's scene-by-scene plan
+    # Build ordered list of (image_url, weight_words, caption_text, zoom_center) from Gemini's scene-by-scene plan
     ordered_specs = []
     if scenes and isinstance(scenes, list) and image_urls:
         used_indices = set()
@@ -892,23 +1010,30 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
             if not isinstance(sc, dict):
                 continue
             idx = sc.get("image_index", 0)
-            if not isinstance(idx, int) or idx < 0 or idx >= len(image_urls) or idx in used_indices:
-                # Pick next unused image so all photos in pool get shown
+            is_second_view = False
+            if not isinstance(idx, int) or idx < 0 or idx >= len(image_urls):
                 unused = [i for i in range(len(image_urls)) if i not in used_indices]
                 idx = unused[0] if unused else (len(ordered_specs) % len(image_urls))
+            elif idx in used_indices:
+                # If authentic web photo is deliberately chosen a 2nd time in Chapter 2, render with center-focus zoom!
+                if "dulichcheckin.com" in image_urls[idx]:
+                    is_second_view = True
+                else:
+                    unused = [i for i in range(len(image_urls)) if i not in used_indices]
+                    idx = unused[0] if unused else (len(ordered_specs) % len(image_urls))
             used_indices.add(idx)
             words = max(5, len(str(sc.get("narration", "")).split()))
             cap = str(sc.get("caption") or sc.get("narration") or short_loc).strip()
-            ordered_specs.append((image_urls[idx], words, cap))
+            ordered_specs.append((image_urls[idx], words, cap, is_second_view))
 
     if not ordered_specs:
         for u in image_urls[:15]:
-            ordered_specs.append((u, 18, short_loc))
+            ordered_specs.append((u, 18, short_loc, False))
 
     dl_imgs = []
     weights = []
-    total_spec_count = min(16, len(ordered_specs))
-    for idx, (u, w, cap) in enumerate(ordered_specs[:16]):
+    total_spec_count = min(max_scenes, len(ordered_specs))
+    for idx, (u, w, cap, z_center) in enumerate(ordered_specs[:max_scenes]):
         try:
             r = requests.get(u, headers=headers, timeout=20)
             if r.status_code == 200 and len(r.content) > 5000:
@@ -917,12 +1042,12 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
                 raw_im = Image.open(raw_p).convert("RGB")
                 raw_p.unlink(missing_ok=True)
 
-                tv_frame = render_tv_frame_1280x720(raw_im, cap, short_loc, len(dl_imgs) + 1, total_spec_count)
+                tv_frame = render_tv_frame_1280x720(raw_im, cap, short_loc, len(dl_imgs) + 1, total_spec_count, zoom_center=z_center)
                 p = WORK_DIR / f"slide_{idx}.jpg"
                 tv_frame.save(p, "JPEG", quality=93)
                 dl_imgs.append(p)
                 weights.append(w)
-                print(f"Scene #{len(dl_imgs)} ({w} words | '{cap[:35]}') -> image: {u}")
+                print(f"Scene #{len(dl_imgs)} ({w} words | zoom={z_center} | '{cap[:35]}') -> image: {u}")
         except Exception as e:
             print(f"Skip image {u}: {e}")
             continue
@@ -939,7 +1064,11 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
         seg_dur = max(2.5, total_target * (w / total_w))
         clip_p = WORK_DIR / f"clip_{i}.mp4"
         fade_Out_st = max(0.5, seg_dur - 0.35)
-        vf_str = f"scale=1280:720,fade=t=in:st=0:d=0.35,fade=t=out:st={fade_Out_st:.2f}:d=0.35,format=yuv420p"
+        # First slide starts at 100% brightness immediately at 0.00s so auto-thumbnails are never dark!
+        if i == 0:
+            vf_str = f"scale=1280:720,fade=t=out:st={fade_Out_st:.2f}:d=0.35,format=yuv420p"
+        else:
+            vf_str = f"scale=1280:720,fade=t=in:st=0:d=0.35,fade=t=out:st={fade_Out_st:.2f}:d=0.35,format=yuv420p"
         subprocess.run(
             [
                 "ffmpeg", "-y",
@@ -1365,22 +1494,48 @@ def main():
             })
 
         elif ch == "youtube":
-            mp4_path, mp4_release_url, duration, short_loc, _ = get_or_build_hd_video(article, slug, now_str)
             yt_data = generate_channel_script("youtube", article)
             yt_title = (yt_data.get("title") or article["h1"]).strip()[:98]
-            yt_short_loc = (yt_data.get("short_location_name") or short_loc).strip()
+            yt_short_loc = (yt_data.get("short_location_name") or re.split(r"[:|–—?-]", article["h1"])[0]).strip()
             yt_raw_desc = (yt_data.get("description") or article["content"][:2200]).strip()
             yt_full_desc = enforce_varied_bare_link_plain(yt_raw_desc, article_url, yt_short_loc, max_chars=4600)
             yt_tags = (yt_data.get("tags") or f"du lịch checkin, {yt_short_loc}, du lịch việt nam").strip()
-            print(f"Prepared YouTube HD Video Package: '{yt_title}' | MP4: {mp4_release_url}")
-            existing_yt = (read_status_json().get(article_url) or {}).get("youtube") or {}
+
+            # Build dedicated ~4.5 - 5 minute (2-chapter) HD video exclusively for YouTube
+            yt_mp3_path = WORK_DIR / f"{slug}-youtube-5min.mp3"
+            style_dir = (
+                "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
+            )
+            ch1_speech = (yt_data.get("chapter1_speech") or yt_data.get("speech_script") or "").strip()
+            ch2_speech = (yt_data.get("chapter2_speech") or "").strip()
+            yt_duration = call_gemini_tts_two_chapters_to_mp3(ch1_speech, ch2_speech, style_dir, yt_mp3_path, key_offset=3)
+            print(f"Generated Dedicated 5-Min YouTube Voice MP3 (2 Chapters + Studio BGM): {yt_mp3_path.name} ({yt_duration:.1f}s)")
+
+            yt_mp4_path = WORK_DIR / f"{slug}-youtube-5min.mp4"
+            build_hd_video_from_images(
+                article["images"],
+                yt_mp3_path,
+                yt_duration,
+                yt_mp4_path,
+                yt_data.get("scenes"),
+                yt_short_loc,
+                max_scenes=24,
+            )
+            print(f"Built Dedicated YouTube HD MP4: {yt_mp4_path.name} ({yt_mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
+            yt_mp4_url, _ = upload_mp3_to_github_release(yt_mp4_path)
+
+            yt_thumb_jpg = WORK_DIR / f"{slug}-youtube-thumb.jpg"
+            yt_thumb_url = build_youtube_thumbnail_1280x720(article["images"], yt_title, yt_short_loc, yt_thumb_jpg)
+            print(f"Prepared YouTube 5-Min HD Video Package: '{yt_title}' ({yt_duration:.1f}s) | MP4: {yt_mp4_url} | Thumb: {yt_thumb_url}")
+
             update_status_json(article_url, "youtube", {
                 "title": yt_title,
                 "description": yt_full_desc,
                 "tags": yt_tags,
-                "mp4_url": mp4_release_url,
-                "video_url": existing_yt.get("video_url", ""),
-                "duration_sec": round(duration, 1),
+                "mp4_url": yt_mp4_url,
+                "thumb_url": yt_thumb_url,
+                "video_url": "",
+                "duration_sec": round(yt_duration, 1),
                 "ready_for_yt": True,
                 "published_at": now_str,
             })
