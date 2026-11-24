@@ -496,15 +496,15 @@ def upload_to_dailymotion(mp4_path: Path, title: str, description: str, tags: st
     access_token = tok_res.json()["access_token"]
     auth_headers = {"Authorization": f"Bearer {access_token}"}
 
-    # Decode Partner User/Channel ID ('oid') directly from JWT payload (required instead of /me/ for client_credentials!)
+    # Decode Partner Channel Owner ID ('ooi' = Du Lich Checkin channel ID) from JWT payload
     jwt_parts = access_token.split(".")
     pad = "=" * ((4 - len(jwt_parts[1]) % 4) % 4)
     claims = json.loads(base64.urlsafe_b64decode(jwt_parts[1] + pad).decode("utf-8"))
-    dm_user_id = claims.get("oid") or claims.get("uid") or "me"
-    print(f"Dailymotion Partner Channel ID (oid): {dm_user_id}")
+    dm_user_id = claims.get("ooi") or claims.get("oid") or "me"
+    print(f"Dailymotion Partner Channel Owner ID (ooi): {dm_user_id}")
 
-    # 2. Request upload URL
-    up_info = requests.get("https://api.dailymotion.com/file/upload", headers=auth_headers, timeout=30)
+    # 2. Request upload URL via Partner API
+    up_info = requests.get("https://partner.api.dailymotion.com/rest/file/upload", headers=auth_headers, timeout=30)
     up_info.raise_for_status()
     upload_url = up_info.json()["upload_url"]
 
@@ -514,7 +514,7 @@ def upload_to_dailymotion(mp4_path: Path, title: str, description: str, tags: st
     file_res.raise_for_status()
     uploaded_file_url = file_res.json()["url"]
 
-    # 4. Create & publish video under /user/{oid}/videos (Partner API client_credentials endpoint)
+    # 4. Create & publish video under Partner API /rest/user/{ooi}/videos
     full_desc = f"{description.strip()}\n\nXem chi tiết lịch trình và kinh nghiệm tham quan tại: {article_url}"
     pub_payload = {
         "url": uploaded_file_url,
@@ -527,19 +527,11 @@ def upload_to_dailymotion(mp4_path: Path, title: str, description: str, tags: st
         "is_created_for_kids": "false",
     }
     pub_res = requests.post(
-        f"https://api.dailymotion.com/user/{dm_user_id}/videos",
+        f"https://partner.api.dailymotion.com/rest/user/{dm_user_id}/videos",
         headers=auth_headers,
         data=pub_payload,
         timeout=60,
     )
-    if pub_res.status_code >= 400:
-        print(f"Dailymotion /user/{dm_user_id}/videos error {pub_res.status_code}: {pub_res.text}")
-        pub_res = requests.post(
-            f"https://partner.api.dailymotion.com/rest/user/{dm_user_id}/videos",
-            headers=auth_headers,
-            data=pub_payload,
-            timeout=60,
-        )
     if pub_res.status_code >= 400:
         raise RuntimeError(f"Dailymotion publish failed HTTP {pub_res.status_code}: {pub_res.text}")
     vid_id = pub_res.json()["id"]
