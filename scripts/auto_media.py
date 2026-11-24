@@ -248,14 +248,14 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
         parts.append({"text": f"--- ẢNH ỨNG VIÊN #{idx} ---"})
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": cand["b64"]}})
 
-    models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-2.0-flash"]
+    models = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-pro-preview"]
     for m_idx, model in enumerate(models):
         for k_try in range(min(2, len(GEMINI_KEYS))):
             key = GEMINI_KEYS[(m_idx + k_try) % len(GEMINI_KEYS)]
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
             payload = {
                 "contents": [{"parts": parts}],
-                "generationConfig": {"temperature": 0.25, "responseMimeType": "application/json"},
+                "generationConfig": {"temperature": 0.25, "maxOutputTokens": 4096, "responseMimeType": "application/json"},
             }
             try:
                 vr = requests.post(url, json=payload, timeout=90)
@@ -294,36 +294,42 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
     models = [
         "gemini-2.5-flash",
         "gemini-3.8-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-3.8-flash-lite",
+        "gemini-3.1-pro-preview",
         "gemini-3.6-flash",
-        "gemini-2.0-flash",
-        "gemini-2.5-pro",
     ]
     last_err = ""
-    for m_idx, model in enumerate(models):
-        for k_try in range(len(GEMINI_KEYS)):
-            key = GEMINI_KEYS[(key_offset + m_idx + k_try) % len(GEMINI_KEYS)]
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.72, "responseMimeType": "application/json"},
-            }
-            try:
-                r = requests.post(url, json=payload, timeout=110)
-                if r.status_code == 200:
-                    txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                    parsed = json.loads(txt)
-                    if isinstance(parsed, list):
-                        if len(parsed) > 0 and isinstance(parsed[0], dict) and ("title" in parsed[0] or "speech_script" in parsed[0] or "scenes" in parsed[0]):
-                            return parsed[0]
-                        return {"scenes": parsed}
-                    return parsed
-                last_err = f"HTTP {r.status_code} ({model}): {r.text[:200]}"
-                if r.status_code in (429, 503):
-                    time.sleep(3)
-            except Exception as e:
-                last_err = str(e)
+    for round_try in range(2):
+        for m_idx, model in enumerate(models):
+            for k_try in range(len(GEMINI_KEYS)):
+                key = GEMINI_KEYS[(key_offset + m_idx + k_try + round_try) % len(GEMINI_KEYS)]
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
+                payload = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.7,
+                        "maxOutputTokens": 8192,
+                        "responseMimeType": "application/json",
+                    },
+                }
+                try:
+                    r = requests.post(url, json=payload, timeout=110)
+                    if r.status_code == 200:
+                        txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.I).strip()
+                        parsed = json.loads(txt)
+                        if isinstance(parsed, list):
+                            if len(parsed) > 0 and isinstance(parsed[0], dict) and ("title" in parsed[0] or "speech_script" in parsed[0] or "scenes" in parsed[0]):
+                                return parsed[0]
+                            return {"scenes": parsed}
+                        return parsed
+                    last_err = f"HTTP {r.status_code} ({model}): {r.text[:200]}"
+                    print(f"call_gemini_json retry note: {last_err}")
+                    if r.status_code in (429, 503):
+                        time.sleep(4)
+                except Exception as e:
+                    last_err = f"{model} parse/net err: {e}"
+                    print(f"call_gemini_json exception note: {last_err}")
+                    time.sleep(2)
     raise RuntimeError(f"Gemini JSON failed: {last_err}")
 
 
@@ -671,48 +677,59 @@ Trả về đúng JSON với 5 khóa:
             f"- Ảnh #{idx}: {it.get('desc') or 'Hình ảnh thực tế'}"
             for idx, it in enumerate(img_items)
         )
-        prompt = f"""{base}
+        max_img_idx = max(0, len(img_items) - 1)
 
-KHO ẢNH THẬT ĐÃ QUA AI VISION NHÌN & MÔ TẢ CHI TIẾT (GỒM ẢNH GỐC BÀI WEB + ẢNH TÌM KIẾM ĐÃ DUYỆT):
+        prompt_ch1 = f"""{base}
+
+KHO ẢNH THẬT ĐÃ QUA AI VISION NHÌN & MÔ TẢ CHI TIẾT (CHỈ SỐ TỪ 0 ĐẾN {max_img_idx}):
 {img_catalog}
 
-NHIỆM VỤ RIÊNG CHO PHÓNG SỰ VIDEO [YOUTUBE HD 4.5 - 5 PHÚT (34 - 38 PHÂN CẢNH ĐỔI ẢNH LIÊN TỤC MỖI 7 GIÂY)]:
-1. KỊCH BẢN THUYẾT MINH CHUYÊN SÂU DÀI KHOẢNG 660 - 760 TỪ (~4.5 - 5 PHÚT), CHIA THÀNH 34 ĐẾN 38 PHÂN CẢNH ("scenes"):
-   - Để người xem không bị nhàm chán, cứ mỗi 18 - 22 từ lời bình (~7 giây) là PHẢI chuyển sang 1 phân cảnh mới với 1 bức ảnh mới khớp 100% với câu đang nói!
-   - Chương 1 (Cảnh 1 đến Cảnh 18): Mở đầu ấn tượng, vị trí địa lý, chiều sâu lịch sử, sự tích / truyền thuyết thần thoại và đi sâu khám phá từng nét kiến trúc, cổng đền, chính điện, hang động, giếng cổ, cảnh quan đặc sắc từ bài gốc.
-   - Chương 2 (Cảnh 19 đến Cảnh 36+): Cẩm nang thực tế chi tiết từ bài gốc (thời điểm đi lễ/tham quan, giờ mở cửa, giá vé, hướng dẫn di chuyển, cách sắm lễ vật chay/mặn, lưu ý đọc văn khấn, trang phục ứng xử, ẩm thực đặc sản và kinh nghiệm thực tế).
-   - Viết theo lối Biên tập viên truyền hình ngọt ngào, truyền cảm, chủ động dùng dấu phẩy (,) và gạch ngang (—) để ngắt nhịp.
-2. QUY TẮC CHỌN NGUỒN ẢNH CHO TỪNG PHÂN CẢNH (KẾT HỢP ẢNH CHỤP THẬT & ẢNH AI VẼ MINH HỌA):
-   - Với các cảnh nói về KIẾN TRÚC, CỔNG ĐỀN, BAN THỜ, TƯỢNG THỜ, HANG ĐỘNG, GIẾNG TIÊN, CẢNH QUAN THỰC TẾ của địa điểm:
-     + Đặt `"type": "photo"` và chọn `"image_index"` (từ 0 đến {max(0, len(img_items)-1)}) có mô tả trong kho ảnh khớp nhất với câu thuyết minh đó. Hãy sử dụng hết toàn bộ kho ảnh thật ở trên!
-   - Với khoảng 10 đến 14 phân cảnh nói về các nội dung KHÔNG CẦN ẢNH CHỤP ĐỊA ĐIỂM THẬT (như: **Sự tích / Truyền thuyết / Lịch sử cổ xưa**, **Hướng dẫn sắm lễ / Mâm lễ vật dâng hương**, **Nghi thức đọc văn khấn**, **Chuẩn bị trang phục lịch sự / Hành trang khởi hành / Phương tiện di chuyển / Ẩm thực đặc sản**):
-     + Đặt `"type": "ai_gen"`, `"image_index": -1`, và viết `"ai_prompt_en"` (câu lệnh tiếng Anh dài 20-35 từ mô tả khung cảnh điện ảnh chân thực 16:9 chuẩn văn hóa Việt Nam để AI vẽ bức ảnh minh họa tuyệt đẹp cho đúng câu nói đó, tuyệt đối không có chữ trong ảnh).
-3. "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
-4. "title": Tiêu đề video YouTube hấp dẫn, chuẩn SEO, có dấu tiếng Việt (50-85 ký tự).
-5. "description": Bài cẩm nang mô tả video YouTube chuyên sâu dài khoảng 480-620 từ (chia 4-5 đoạn văn rõ ràng bằng \\n\\n, văn bản thuần KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL).
-6. "tags": Chuỗi 8-12 từ khóa tiếng Việt chuẩn SEO YouTube ngăn cách bởi dấu phẩy.
+NHIỆM VỤ PHẦN 1 CHO PHÓNG SỰ VIDEO [YOUTUBE HD - CHƯƠNG 1 (17 PHÂN CẢNH ĐẦU: GIỚI THIỆU, SỰ TÍCH & KIẾN TRÚC)]:
+1. Hãy viết CHƯƠNG 1 của phóng sự gồm ĐÚNG 17 PHÂN CẢNH ("scenes"), mỗi phân cảnh có lời bình ("narration") dài 18-22 từ (~7 giây/cảnh):
+   - Khai thác toàn diện nửa đầu bài viết: Mở đầu cuốn hút, vị trí địa lý, nguồn gốc lịch sử, sự tích / truyền thuyết thần thoại và đi sâu khám phá từng nét kiến trúc, cổng đền, chính điện, hang động, giếng cổ, cảnh quan đặc sắc.
+2. QUY TẮC CHỌN NGUỒN ẢNH CHO TỪNG CẢNH:
+   - Với các cảnh nói về KIẾN TRÚC, CỔNG ĐỀN, BAN THỜ, TƯỢNG THỜ, HANG ĐỘNG, GIẾNG TIÊN, CẢNH QUAN THỰC TẾ: Đặt `"type": "photo"`, chọn `"image_index"` (0 đến {max_img_idx}) khớp nhất với lời nói, `"ai_prompt_en": ""`.
+   - Với 5-6 phân cảnh kể về **Sự tích / Truyền thuyết / Lịch sử cổ xưa** (những chuyện thần thoại/lịch sử không có ảnh chụp thật): Đặt `"type": "ai_gen"`, `"image_index": -1`, và viết `"ai_prompt_en"` (câu lệnh tiếng Anh 18-28 từ mô tả tranh điện ảnh lịch sử/văn hóa Việt Nam 16:9 để AI vẽ ảnh minh họa).
+3. Đồng thời viết bộ SEO YouTube:
+   - "short_location_name": Tên địa điểm cốt lõi có dấu (3-6 từ).
+   - "title": Tiêu đề video YouTube hấp dẫn, chuẩn SEO (50-85 ký tự).
+   - "description": Bài cẩm nang mô tả video YouTube chuyên sâu dài 480-600 từ (chia 4-5 đoạn bằng \\n\\n, văn bản thuần không HTML, không tự chèn URL).
+   - "tags": Chuỗi 8-12 từ khóa ngăn cách bởi dấu phẩy.
 
-Trả về đúng JSON với 5 khóa:
-- "short_location_name": chuỗi
-- "title": chuỗi
-- "scenes": mảng 34-38 object [{{"type": "photo" hoặc "ai_gen", "image_index": số_nguyên, "ai_prompt_en": "Chuỗi tiếng Anh mô tả ảnh nếu type là ai_gen (hoặc rỗng nếu type là photo)", "caption": "Dòng tiêu đề phụ đề 5-10 từ hiện trên màn hình", "narration": "Đoạn lời bình 18-22 từ (~7 giây) của biên tập viên"}}]
-- "description": chuỗi
-- "tags": chuỗi"""
-        res = call_gemini_json(prompt, key_offset=3)
-        if not isinstance(res, dict):
-            res = {}
-        scenes = [s for s in (res.get("scenes") or []) if isinstance(s, dict) and str(s.get("narration", "")).strip()]
-        res["scenes"] = scenes
-        if scenes:
-            mid = max(1, len(scenes) // 2)
-            res["chapter1_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes[:mid])
-            res["chapter2_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes[mid:])
-            res["speech_script"] = (res["chapter1_speech"] + " " + res["chapter2_speech"]).strip()
-        else:
-            res["chapter1_speech"] = f"Cùng khám phá {article['h1']}."
-            res["chapter2_speech"] = ""
-            res["speech_script"] = res["chapter1_speech"]
-        return res
+Trả về đúng JSON với 5 khóa: "short_location_name", "title", "scenes", "description", "tags"."""
+
+        res1 = call_gemini_json(prompt_ch1, key_offset=2)
+        if not isinstance(res1, dict):
+            res1 = {}
+        scenes_ch1 = [s for s in (res1.get("scenes") or []) if isinstance(s, dict) and str(s.get("narration", "")).strip()]
+
+        prompt_ch2 = f"""{base}
+
+KHO ẢNH THẬT ĐÃ QUA AI VISION NHÌN & MÔ TẢ CHI TIẾT (CHỈ SỐ TỪ 0 ĐẾN {max_img_idx}):
+{img_catalog}
+
+NHIỆM VỤ PHẦN 2 CHO PHÓNG SỰ VIDEO [YOUTUBE HD - CHƯƠNG 2 (17 PHÂN CẢNH TIẾP THEO: CẨM NANG ĐI LỄ, SẮM LỄ, VĂN KHẤN & KINH NGHIỆM THỰC TẾ)]:
+1. Tiếp nối Chương 1 (đã giới thiệu lịch sử & kiến trúc), hãy viết tiếp CHƯƠNG 2 gồm ĐÚNG 17 PHÂN CẢNH ("scenes"), mỗi phân cảnh có lời bình ("narration") dài 18-22 từ (~7 giây/cảnh):
+   - Khai thác toàn diện nửa sau bài viết: Thời điểm đi lễ/tham quan đẹp nhất, giờ mở cửa, giá vé, hướng dẫn đường đi/di chuyển, hướng dẫn sắm lễ vật chay/mặn chi tiết, lưu ý khi dâng hương đọc văn khấn, trang phục ứng xử, ẩm thực đặc sản xung quanh và lời kết chào khán giả.
+2. QUY TẮC CHỌN NGUỒN ẢNH CHO TỪNG CẢNH:
+   - Với khoảng 6-8 phân cảnh nói về **Hướng dẫn sắm lễ / Mâm lễ vật dâng hương**, **Nghi thức đọc văn khấn**, **Chuẩn bị trang phục lịch sự / Hành trang khởi hành / Phương tiện di chuyển / Ẩm thực đặc sản** (không cần ảnh chụp địa điểm thật): Đặt `"type": "ai_gen"`, `"image_index": -1`, và viết `"ai_prompt_en"` (câu lệnh tiếng Anh 18-28 từ mô tả ảnh thực tế 16:9 chuẩn văn hóa Việt Nam để AI vẽ ảnh minh họa).
+   - Với các cảnh còn lại nói về không gian tham quan, đường đi, lễ hội thực tế tại địa điểm: Đặt `"type": "photo"`, chọn `"image_index"` (0 đến {max_img_idx}) phù hợp nhất (ưu tiên các ảnh từ giữa đến cuối kho ảnh), `"ai_prompt_en": ""`.
+
+Trả về đúng JSON với 1 khóa duy nhất:
+- "scenes": mảng 17 object [{{"type": "photo" hoặc "ai_gen", "image_index": số_nguyên, "ai_prompt_en": "Chuỗi tiếng Anh nếu ai_gen", "caption": "Dòng tiêu đề phụ đề 5-10 từ", "narration": "Đoạn lời bình 18-22 từ của biên tập viên"}}]"""
+
+        res2 = call_gemini_json(prompt_ch2, key_offset=4)
+        if not isinstance(res2, dict):
+            res2 = {}
+        scenes_ch2 = [s for s in (res2.get("scenes") or []) if isinstance(s, dict) and str(s.get("narration", "")).strip()]
+
+        all_scenes = scenes_ch1 + scenes_ch2
+        res1["scenes"] = all_scenes
+        res1["chapter1_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes_ch1) or f"Cùng khám phá {article['h1']}."
+        res1["chapter2_speech"] = " ".join(str(s.get("narration", "")).strip() for s in scenes_ch2)
+        res1["speech_script"] = (res1["chapter1_speech"] + " " + res1["chapter2_speech"]).strip()
+        print(f"Generated 2-Chapter YouTube Script: Chapter 1 ({len(scenes_ch1)} scenes) + Chapter 2 ({len(scenes_ch2)} scenes) = {len(all_scenes)} total scenes!")
+        return res1
 
     if channel == "bluesky":
         prompt = f"""{base}
