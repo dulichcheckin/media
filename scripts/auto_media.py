@@ -74,14 +74,65 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
         if len(ht) > 3 and ht not in headings:
             headings.append(ht)
 
-    # Extract article images
+    # Extract ALL article images WITH their alt text / figcaption / filename description
     imgs = []
-    for u in re.findall(r"https?://dulichcheckin\.com/wp-content/uploads/[^\"'\s>)]+\.(?:webp|jpg|jpeg|png)", page_html, re.I):
+    image_items = []
+    img_tag_pattern = re.compile(
+        r"(?:<figure[^>]*>[\s\S]*?<img[^>]+>[\s\S]*?(?:<figcaption[^>]*>([\s\S]*?)</figcaption>)?[\s\S]*?</figure>|<img[^>]+>)",
+        re.I,
+    )
+    for m in img_tag_pattern.finditer(page_html):
+        block = m.group(0)
+        figcap = clean_html_text(m.group(1) or "")
+        url_m = re.search(
+            r"https?://dulichcheckin\.com/wp-content/uploads/[^\"'\s>)]+\.(?:webp|jpg|jpeg|png)",
+            block,
+            re.I,
+        )
+        if not url_m:
+            continue
+        u = url_m.group(0)
         if re.search(r"logo|avatar|icon|banner|cropped|\.gif", u, re.I):
             continue
         clean_u = re.sub(r"-\d{2,4}x\d{2,4}(\.(?:webp|jpg|jpeg|png))$", r"\1", u, flags=re.I)
-        if clean_u not in imgs:
-            imgs.append(clean_u)
+        if clean_u in imgs:
+            continue
+        alt_m = re.search(r'alt=["\']([^"\']*)["\']', block, re.I)
+        alt_txt = clean_html_text(alt_m.group(1) if alt_m else "")
+        fname_slug = Path(urllib.parse.urlparse(clean_u).path).stem.replace("-", " ")
+        desc_label = alt_txt or figcap or fname_slug
+        imgs.append(clean_u)
+        image_items.append({"url": clean_u, "desc": desc_label})
+
+    # Optional: search 2-3 verified external images from Wikipedia VI / Wikimedia matching the exact location name
+    loc_short = re.split(r"[:|–—?-]", h1_title)[0].strip()
+    if len(loc_short) >= 4:
+        try:
+            w_url = (
+                "https://commons.wikimedia.org/w/api.php?action=query&generator=search"
+                f"&gsrsearch=filetype:bitmap|{urllib.parse.quote(loc_short)}&gsrlimit=6"
+                "&prop=imageinfo&iiprop=url|extmetadata&format=json"
+            )
+            wr = requests.get(w_url, headers=headers, timeout=12)
+            if wr.status_code == 200:
+                pages = wr.json().get("query", {}).get("pages", {})
+                loc_slug_words = [w for w in to_seo_slug(loc_short).split("-") if len(w) > 2]
+                ext_added = 0
+                for p in pages.values():
+                    t_slug = to_seo_slug(p.get("title", ""))
+                    if loc_slug_words and not all(w in t_slug for w in loc_slug_words[:2]):
+                        continue
+                    ii = (p.get("imageinfo") or [{}])[0]
+                    iu = ii.get("url", "")
+                    if re.search(r"\.(?:jpg|jpeg|png)$", iu, re.I) and not re.search(r"map|icon|logo|flag|stamp", iu, re.I):
+                        if iu not in imgs:
+                            imgs.append(iu)
+                            image_items.append({"url": iu, "desc": f"Ảnh góc nhìn thực tế {loc_short} ({p.get('title', '').replace('File:', '')})"})
+                            ext_added += 1
+                            if ext_added >= 3:
+                                break
+        except Exception:
+            pass
 
     body = re.sub(r"<(script|style|nav|footer|aside)[\s\S]*?</\1>", " ", page_html, flags=re.I)
     body = re.sub(r"<[^>]+>", " ", body)
@@ -93,7 +144,8 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
         "h1": h1_title,
         "outline": " | ".join(headings[:15]),
         "content": body[:12000],
-        "images": imgs[:12],
+        "images": imgs[:16],
+        "image_items": image_items[:16],
     }
 
 
@@ -218,16 +270,37 @@ Trả về đúng JSON với 3 khóa: "title", "speech_script", "description".""
         return call_gemini_json(prompt, key_offset=1)
 
     if channel == "dailymotion":
+        img_items = article.get("image_items") or []
+        img_catalog = "\n".join(
+            f"- Ảnh #{idx}: {it.get('desc') or 'Hình ảnh thực tế địa điểm'}"
+            for idx, it in enumerate(img_items)
+        )
         prompt = f"""{base}
 
-NHIỆM VỤ RIÊNG CHO VIDEO [DAILYMOTION - ĐIỂM NHẤN TRỰC QUAN 45-60 GIÂY]:
-- "title": Tiêu đề video du lịch thu hút, rõ địa điểm, có dấu tiếng Việt (45-75 ký tự).
-- "speech_script": Kịch bản thuyết minh video ngắn gọn, cuốn hút dài khoảng 120-150 từ (đọc khoảng 45-60 giây). Đi thẳng vào 3-4 điểm ấn tượng nhất về kiến trúc, cảnh quan và kinh nghiệm thực tế của địa điểm. Kết ngắn gọn mời xem bài viết đầy đủ tại Du Lịch Checkin.
-- "description": Đoạn mô tả video dài 130-190 từ, chia 2 đoạn súc tích, KHÔNG tự chèn URL (hệ thống sẽ tự gắn 1 dòng dẫn kèm link trần ở cuối).
-- "tags": Chuỗi 5-8 từ khóa tiếng Việt không dấu hoặc có dấu ngăn cách bởi dấu phẩy (VD: "du lich ha noi, den bach ma, du lich viet nam, du lich checkin").
+DANH SÁCH TOÀN BỘ BỘ ẢNH THỰC TẾ SẼ HIỂN THỊ TRONG VIDEO (ĐÃ ĐỌC TỪ THẺ ALT / CHÚ THÍCH ẢNH TRÊN BÀI WEB):
+{img_catalog}
 
-Trả về đúng JSON với 4 khóa: "title", "speech_script", "description", "tags"."""
-        return call_gemini_json(prompt, key_offset=2)
+NHIỆM VỤ RIÊNG CHO VIDEO [DAILYMOTION - ĐẠO DIỄN KỊCH BẢN KHỚP TỪNG BỨC ẢNH]:
+1. Hãy xem kỹ danh sách ảnh ở trên để biết từng bức ảnh chụp góc nào, chi tiết gì.
+2. Lên kịch bản gồm các phân cảnh ("scenes") đi qua toàn bộ các bức ảnh đẹp trong danh sách trên (từ 7 đến 12 phân cảnh):
+   - Mỗi phân cảnh ứng với 1 bức ảnh ("image_index": số thứ tự ảnh từ 0 trở đi).
+   - Câu thuyết minh ("narration": dài khoảng 12-20 từ) của phân cảnh nào PHẢI NÓI ĐÚNG VỀ CHI TIẾT/NỘI DUNG CỦA BỨC ẢNH ĐÓ (ví dụ ảnh chụp cổng tam quan thì thuyết minh về cổng tam quan; ảnh chụp tượng thờ/chính điện thì thuyết minh về không gian thờ tự; ảnh chụp sơ đồ/lưu ý thì nói về bố cục hoặc kinh nghiệm tham quan), đồng thời nối với nhau thành một bài thuyết minh mạch lạc, tự nhiên từ đầu đến cuối video!
+3. "title": Tiêu đề video du lịch thu hút, rõ địa điểm, có dấu tiếng Việt (45-75 ký tự).
+4. "description": Đoạn mô tả video dài 130-190 từ, chia 2 đoạn súc tích, KHÔNG tự chèn URL (hệ thống sẽ tự gắn 1 dòng dẫn kèm link trần ở cuối).
+5. "tags": Chuỗi 5-8 từ khóa tiếng Việt ngăn cách bởi dấu phẩy.
+
+Trả về đúng JSON với 4 khóa:
+- "title": chuỗi
+- "scenes": mảng các object [{{"image_index": số_nguyên, "narration": "câu thuyết minh khớp với bức ảnh đó"}}]
+- "description": chuỗi
+- "tags": chuỗi"""
+        res = call_gemini_json(prompt, key_offset=2)
+        scenes = res.get("scenes") or []
+        if scenes and isinstance(scenes, list):
+            res["speech_script"] = " ".join(
+                str(s.get("narration", "")).strip() for s in scenes if str(s.get("narration", "")).strip()
+            )
+        return res
 
     raise ValueError(f"Unknown channel: {channel}")
 
@@ -385,7 +458,7 @@ def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: s
     <itunes:explicit>false</itunes:explicit>
     <itunes:owner>
       <itunes:name>Du Lịch Checkin</itunes:name>
-      <itunes:email>contact@dulichcheckin.com</itunes:email>
+      <itunes:email>dulichcheckinprofile1@gmail.com</itunes:email>
     </itunes:owner>
     <itunes:image href="{cover_url}"/>
     <itunes:category text="Leisure">
@@ -399,16 +472,32 @@ def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: s
     return feed_url
 
 
-def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_sec: float, out_mp4: Path):
-    """Build a crisp 1280x720 HD slideshow video directly from dulichcheckin.com images + Aoede voiceover."""
+def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_sec: float, out_mp4: Path, scenes: list | None = None):
+    """Build a crisp 1280x720 HD slideshow video where each image & its duration match the exact spoken scene."""
     from PIL import Image, ImageOps
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Referer": "https://dulichcheckin.com/",
     }
+
+    # Build ordered list of (image_url, weight_words) from Gemini's scene-by-scene plan
+    ordered_specs = []
+    if scenes and isinstance(scenes, list) and image_urls:
+        for sc in scenes:
+            idx = sc.get("image_index", 0)
+            if not isinstance(idx, int) or idx < 0 or idx >= len(image_urls):
+                idx = min(len(ordered_specs), len(image_urls) - 1)
+            words = max(4, len(str(sc.get("narration", "")).split()))
+            ordered_specs.append((image_urls[idx], words))
+
+    if not ordered_specs:
+        for u in image_urls[:12]:
+            ordered_specs.append((u, 15))
+
     dl_imgs = []
-    for idx, u in enumerate(image_urls[:10]):
+    weights = []
+    for idx, (u, w) in enumerate(ordered_specs[:14]):
         try:
             r = requests.get(u, headers=headers, timeout=20)
             if r.status_code == 200 and len(r.content) > 5000:
@@ -420,29 +509,29 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
                 im.save(p, "JPEG", quality=92)
                 raw_p.unlink(missing_ok=True)
                 dl_imgs.append(p)
-                print(f"Downloaded real article image #{len(dl_imgs)}: {u}")
+                weights.append(w)
+                print(f"Scene #{len(dl_imgs)} ({w} words) -> image: {u}")
         except Exception as e:
             print(f"Skip image {u}: {e}")
             continue
-        if len(dl_imgs) >= 7:
-            break
 
     if not dl_imgs:
         raise RuntimeError("Could not download any article images from dulichcheckin.com")
 
-    # Fast, crisp HD slideshow with smooth fade-in per photo (renders in ~5 seconds!)
-    n = len(dl_imgs)
-    seg_dur = max(3.0, (duration_sec + 0.5) / n)
+    # Calculate each slide's exact duration proportional to the spoken words in its scene
+    total_w = sum(weights) or len(dl_imgs)
+    total_target = duration_sec + 0.4
     clip_paths = []
 
-    for i, img_p in enumerate(dl_imgs):
+    for i, (img_p, w) in enumerate(zip(dl_imgs, weights)):
+        seg_dur = max(2.2, total_target * (w / total_w))
         clip_p = WORK_DIR / f"clip_{i}.mp4"
         subprocess.run(
             [
                 "ffmpeg", "-y",
                 "-loop", "1", "-t", f"{seg_dur:.2f}",
                 "-i", str(img_p),
-                "-vf", "scale=1280:720,fade=t=in:st=0:d=0.4,format=yuv420p",
+                "-vf", "scale=1280:720,fade=t=in:st=0:d=0.35,format=yuv420p",
                 "-r", "25",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
                 "-an", str(clip_p),
@@ -595,7 +684,7 @@ def main():
             })
         elif ch == "dailymotion":
             mp4_path = WORK_DIR / f"{slug}-dailymotion.mp4"
-            build_hd_video_from_images(article["images"], mp3_path, duration, mp4_path)
+            build_hd_video_from_images(article["images"], mp3_path, duration, mp4_path, script_data.get("scenes"))
             print(f"Built HD MP4: {mp4_path.name} ({mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
             # Always upload HD MP4 to GitHub Releases so user can watch/download immediately!
             mp4_release_url, _ = upload_mp3_to_github_release(mp4_path)
