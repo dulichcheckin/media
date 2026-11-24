@@ -173,7 +173,12 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
                 r = requests.post(url, json=payload, timeout=90)
                 if r.status_code == 200:
                     txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                    return json.loads(txt)
+                    parsed = json.loads(txt)
+                    if isinstance(parsed, list):
+                        if len(parsed) > 0 and isinstance(parsed[0], dict) and ("title" in parsed[0] or "speech_script" in parsed[0] or "scenes" in parsed[0]):
+                            return parsed[0]
+                        return {"scenes": parsed}
+                    return parsed
                 last_err = f"HTTP {r.status_code} ({model}): {r.text[:200]}"
                 if r.status_code in (429, 503):
                     time.sleep(2)
@@ -404,11 +409,19 @@ NHIỆM VỤ RIÊNG CHO VIDEO [DAILYMOTION - ĐẠO DIỄN KỊCH BẢN KHỚP T
 
 Trả về đúng JSON với 5 khóa: "short_location_name", "title", "scenes", "description", "tags"."""
         res = call_gemini_json(prompt, key_offset=2)
+        if not isinstance(res, dict):
+            res = {}
         scenes = res.get("scenes") or []
         if scenes and isinstance(scenes, list):
             res["speech_script"] = " ".join(
-                str(s.get("narration", "")).strip() for s in scenes if str(s.get("narration", "")).strip()
+                str(s.get("narration", "")).strip() for s in scenes if isinstance(s, dict) and str(s.get("narration", "")).strip()
             )
+        if not res.get("speech_script"):
+            res["speech_script"] = f"Cùng Du Lịch Checkin khám phá {article['h1']}."
+        if not res.get("title"):
+            res["title"] = article["h1"]
+        if not res.get("description"):
+            res["description"] = article["content"][:1800]
         return res
 
     raise ValueError(f"Unknown channel: {channel}")
