@@ -63,6 +63,15 @@ def to_seo_slug(text: str) -> str:
     return s[:70] or "du-lich-viet-nam"
 
 
+def safe_str(val, join_sep: str = ", ") -> str:
+    """Safely convert any Gemini field (str, list, or dict) into a clean stripped string."""
+    if val is None:
+        return ""
+    if isinstance(val, list):
+        return join_sep.join(str(x).strip() for x in val if str(x).strip()).strip()
+    return str(val).strip()
+
+
 def clean_html_text(raw: str) -> str:
     if not raw:
         return ""
@@ -248,12 +257,15 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
         parts.append({"text": f"--- ẢNH ỨNG VIÊN #{idx} ---"})
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": cand["b64"]}})
 
+    # Prioritize Flagship models first, fallback to Lite models only if Flagship models are busy
     models = [
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
         "gemini-3-flash-preview",
         "gemini-3.5-flash-lite",
         "gemini-flash-lite-latest",
-        "gemini-3.6-flash",
-        "gemini-3.8-flash",
     ]
     for m_idx, model in enumerate(models):
         for k_try in range(min(2, len(GEMINI_KEYS))):
@@ -297,20 +309,26 @@ def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: s
 
 
 def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
+    # Prioritize Flagship models first, fallback to Lite models only when Flagship models are overloaded
     models = [
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
         "gemini-3-flash-preview",
         "gemini-3.5-flash-lite",
         "gemini-flash-lite-latest",
-        "gemini-3.6-flash",
-        "gemini-3.8-flash",
-        "gemini-3.7-flash",
-        "gemini-3.5-flash",
     ]
     last_err = ""
-    for round_try in range(2):
+    for round_try in range(3):
+        if round_try > 0:
+            wait_sec = 8 * round_try
+            print(f"All models busy on round {round_try}, waiting {wait_sec}s before resuming this step...")
+            time.sleep(wait_sec)
         for m_idx, model in enumerate(models):
-            for k_try in range(len(GEMINI_KEYS)):
-                key = GEMINI_KEYS[(key_offset + m_idx + k_try + round_try) % len(GEMINI_KEYS)]
+            # Try 2 rotated keys per model so we move quickly through flagship models before waiting
+            for k_try in range(min(3, len(GEMINI_KEYS))):
+                key = GEMINI_KEYS[(key_offset + m_idx * 2 + k_try + round_try) % len(GEMINI_KEYS)]
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
                 payload = {
                     "contents": [{"parts": [{"text": prompt}]}],
@@ -329,14 +347,13 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
                             if len(parsed) > 0 and isinstance(parsed[0], dict) and ("title" in parsed[0] or "speech_script" in parsed[0] or "scenes" in parsed[0]):
                                 return parsed[0]
                             return {"scenes": parsed}
+                        print(f"call_gemini_json succeeded on model: {model}")
                         return parsed
-                    last_err = f"HTTP {r.status_code} ({model}): {r.text[:200]}"
-                    print(f"call_gemini_json retry note: {last_err}")
+                    last_err = f"HTTP {r.status_code} ({model}): {r.text[:160]}"
                     if r.status_code in (429, 503):
-                        time.sleep(4)
+                        time.sleep(2)
                 except Exception as e:
                     last_err = f"{model} parse/net err: {e}"
-                    print(f"call_gemini_json exception note: {last_err}")
                     time.sleep(2)
     raise RuntimeError(f"Gemini JSON failed: {last_err}")
 
@@ -412,11 +429,15 @@ def mix_studio_bgm_into_pcm(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes
 def call_gemini_tts_raw_pcm(speech_script: str, style_direction: str, key_offset: int = 0) -> tuple[bytes, int]:
     """Generate raw 16-bit mono PCM audio bytes + sample_rate from Gemini 2.5 Flash TTS (voice Aoede)."""
     full_prompt = f"{style_direction}\n\n{speech_script}"
-    tts_models = ["gemini-2.5-flash-preview-tts", "gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
+    # Try best voice model (2.5-flash-preview-tts) twice with an 8s pause before falling back to 3.8-flash-tts / lite
+    tts_models = ["gemini-2.5-flash-preview-tts", "gemini-2.5-flash-preview-tts", "gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
     last_err = ""
-    for m_name in tts_models:
+    for m_idx, m_name in enumerate(tts_models):
+        if m_idx == 1:
+            print("gemini-2.5-flash-preview-tts busy on first pass, waiting 8s to retry flagship TTS...")
+            time.sleep(8)
         for k_try in range(len(GEMINI_KEYS)):
-            key = GEMINI_KEYS[(key_offset + k_try) % len(GEMINI_KEYS)]
+            key = GEMINI_KEYS[(key_offset + m_idx + k_try) % len(GEMINI_KEYS)]
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={urllib.parse.quote(key)}"
             payload = {
                 "contents": [{"parts": [{"text": full_prompt}]}],
@@ -440,7 +461,7 @@ def call_gemini_tts_raw_pcm(speech_script: str, style_direction: str, key_offset
                     return pcm_bytes, sample_rate
                 last_err = f"HTTP {r.status_code} ({m_name}): {r.text[:200]}"
                 if r.status_code in (429, 503):
-                    time.sleep(2)
+                    time.sleep(3)
             except Exception as e:
                 last_err = str(e)
     raise RuntimeError(f"Gemini TTS failed: {last_err}")
@@ -1628,10 +1649,10 @@ def main():
 
         if ch in ("spotify", "castbox"):
             script_data = generate_channel_script(ch, article)
-            ep_title = script_data["title"].strip()
-            speech = script_data["speech_script"].strip()
-            desc = script_data["description"].strip()
-            short_loc = (script_data.get("short_location_name") or re.split(r"[:|–—?-]", article["h1"])[0]).strip()
+            ep_title = safe_str(script_data.get("title")) or article["h1"]
+            speech = safe_str(script_data.get("speech_script"), " ")
+            desc = safe_str(script_data.get("description"), "\n\n")
+            short_loc = safe_str(script_data.get("short_location_name")) or re.split(r"[:|–—?-]", article["h1"])[0].strip()
 
             mp3_path = WORK_DIR / f"{slug}-{ch}.mp3"
             style_dir = (
@@ -1657,14 +1678,15 @@ def main():
         elif ch == "dailymotion":
             mp4_path, mp4_release_url, duration, short_loc, master_data = get_or_build_hd_video(article, slug, now_str)
             script_data = master_data if master_data.get("title") else generate_channel_script("dailymotion", article)
-            ep_title = script_data["title"].strip()
-            desc = script_data["description"].strip()
-            short_loc = (script_data.get("short_location_name") or short_loc).strip()
+            ep_title = safe_str(script_data.get("title")) or article["h1"]
+            desc = safe_str(script_data.get("description"), "\n\n")
+            short_loc = safe_str(script_data.get("short_location_name")) or short_loc
+            dm_tags = safe_str(script_data.get("tags")) or "du lich viet nam, du lich checkin"
 
             dm_url = ""
             dm_note = "ok"
             try:
-                dm_url = upload_to_dailymotion(mp4_path, ep_title, desc, script_data.get("tags", "du lich viet nam, du lich checkin"), article_url, short_loc)
+                dm_url = upload_to_dailymotion(mp4_path, ep_title, desc, dm_tags, article_url, short_loc)
                 print(f"Published Dailymotion Video: {dm_url}")
             except Exception as dm_err:
                 dm_note = str(dm_err)
@@ -1681,11 +1703,11 @@ def main():
         elif ch in ("youtube", "preview"):
             is_preview = (ch == "preview")
             yt_data = generate_channel_script("youtube", article)
-            yt_title = (yt_data.get("title") or article["h1"]).strip()[:98]
-            yt_short_loc = (yt_data.get("short_location_name") or re.split(r"[:|–—?-]", article["h1"])[0]).strip()
-            yt_raw_desc = (yt_data.get("description") or article["content"][:2200]).strip()
+            yt_title = (safe_str(yt_data.get("title")) or article["h1"])[:98]
+            yt_short_loc = safe_str(yt_data.get("short_location_name")) or re.split(r"[:|–—?-]", article["h1"])[0].strip()
+            yt_raw_desc = safe_str(yt_data.get("description"), "\n\n") or article["content"][:2200]
             yt_full_desc = enforce_varied_bare_link_plain(yt_raw_desc, article_url, yt_short_loc, max_chars=4600)
-            yt_tags = (yt_data.get("tags") or f"du lịch checkin, {yt_short_loc}, du lịch việt nam").strip()
+            yt_tags = safe_str(yt_data.get("tags")) or f"du lịch checkin, {yt_short_loc}, du lịch việt nam"
 
             # Build dedicated ~4.5 - 5 minute (2-chapter, 34-38 scenes) HD video
             file_tag = "preview-5min" if is_preview else "youtube-5min"
@@ -1693,8 +1715,8 @@ def main():
             style_dir = (
                 "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
             )
-            ch1_speech = (yt_data.get("chapter1_speech") or yt_data.get("speech_script") or "").strip()
-            ch2_speech = (yt_data.get("chapter2_speech") or "").strip()
+            ch1_speech = safe_str(yt_data.get("chapter1_speech") or yt_data.get("speech_script"), " ")
+            ch2_speech = safe_str(yt_data.get("chapter2_speech"), " ")
             yt_duration = call_gemini_tts_two_chapters_to_mp3(ch1_speech, ch2_speech, style_dir, yt_mp3_path, key_offset=3)
             print(f"Generated Dedicated 5-Min Voice MP3 (2 Chapters + Studio BGM): {yt_mp3_path.name} ({yt_duration:.1f}s)")
 
@@ -1740,9 +1762,9 @@ def main():
         elif ch == "bluesky":
             mp4_path, mp4_release_url, duration, short_loc, _ = get_or_build_hd_video(article, slug, now_str)
             bs_data = generate_channel_script("bluesky", article)
-            bs_title = (bs_data.get("title") or article["h1"]).strip()
-            bs_short_loc = (bs_data.get("short_location_name") or short_loc).strip()
-            bs_text = (bs_data.get("description") or f"Khám phá thực tế {bs_short_loc} cùng Du Lịch Checkin.").strip()
+            bs_title = safe_str(bs_data.get("title")) or article["h1"]
+            bs_short_loc = safe_str(bs_data.get("short_location_name")) or short_loc
+            bs_text = safe_str(bs_data.get("description"), " ") or f"Khám phá thực tế {bs_short_loc} cùng Du Lịch Checkin."
             bs_url = ""
             bs_note = "ok"
             try:
@@ -1763,10 +1785,10 @@ def main():
         elif ch == "archive":
             mp4_path, mp4_release_url, duration, short_loc, _ = get_or_build_hd_video(article, slug, now_str)
             ia_data = generate_channel_script("archive", article)
-            ia_title = (ia_data.get("title") or article["h1"]).strip()
-            ia_short_loc = (ia_data.get("short_location_name") or short_loc).strip()
-            ia_desc = (ia_data.get("description") or f"<p>{article['content'][:2200]}</p>").strip()
-            ia_tags = (ia_data.get("tags") or f"Du Lịch Checkin, {ia_short_loc}, Du lịch Việt Nam").strip()
+            ia_title = safe_str(ia_data.get("title")) or article["h1"]
+            ia_short_loc = safe_str(ia_data.get("short_location_name")) or short_loc
+            ia_desc = safe_str(ia_data.get("description"), "\n\n") or f"<p>{article['content'][:2200]}</p>"
+            ia_tags = safe_str(ia_data.get("tags")) or f"Du Lịch Checkin, {ia_short_loc}, Du lịch Việt Nam"
             ia_url = ""
             ia_note = "ok"
             try:
