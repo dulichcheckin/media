@@ -6,6 +6,14 @@
       "feed_url": "https://dulichcheckin.github.io/media/spotify.xml",
       "duration_sec": 87.3,
       "published_at": "24/11/2026 12:35"
+    },
+    "dailymotion": {
+      "title": "Khám phá đền Bạch Mã Hà Nội ngôi đền cổ nhất Thăng Long tứ trấn",
+      "mp4_url": "https://github.com/dulichcheckin/media/releases/download/audio-files/den-bach-ma-su-tich-van-khan-kinh-nghiem-di-le-dailymotion.mp4",
+      "video_url": "https://www.dailymotion.com/video/xbze2cy",
+      "dm_status": "ok",
+      "duration_sec": 56.5,
+      "published_at": "24/11/2026 13:04"
     }
   }
 }
