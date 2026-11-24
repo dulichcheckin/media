@@ -87,27 +87,41 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
     resp.raise_for_status()
     page_html = resp.text
 
-    h1_m = re.search(r"<h1[^>]*>([\s\S]*?)</h1>", page_html, re.I)
+    # Isolate <article>...</article> so we NEVER touch sidebar or 'Bài viết liên quan' thumbnails at bottom of page!
+    art_m = re.search(r"<article\b[^>]*>([\s\S]*?)</article>", page_html, re.I)
+    article_html = art_m.group(1) if art_m else page_html
+
+    h1_m = re.search(r"<h1[^>]*>([\s\S]*?)</h1>", article_html, re.I) or re.search(r"<h1[^>]*>([\s\S]*?)</h1>", page_html, re.I)
     title_m = re.search(r"<title[^>]*>([^<]+)</title>", page_html, re.I)
     h1_title = clean_html_text(h1_m.group(1) if h1_m else (title_m.group(1) if title_m else fallback_h1))
     if not h1_title:
         h1_title = fallback_h1 or "Du lịch Việt Nam"
 
     headings = []
-    for hm in re.findall(r"<h[23][^>]*>([\s\S]*?)</h[23]>", page_html, re.I):
+    for hm in re.findall(r"<h[23][^>]*>([\s\S]*?)</h[23]>", article_html, re.I):
         ht = clean_html_text(hm)
         if len(ht) > 3 and ht not in headings:
             headings.append(ht)
 
-    # Extract ALL article images WITH their alt text / figcaption / filename description
-    imgs = []
-    image_items = []
+    # Extract Featured Thumbnail (wp-post-image inside <article>) for YouTube/Podcast Cover
+    featured_thumb = ""
+    ft_m = re.search(r"<img[^>]+wp-post-image[^>]+>", article_html, re.I)
+    if ft_m:
+        ft_u = re.search(r"https?://dulichcheckin\.com/wp-content/uploads/[^\"'\s>)]+\.(?:webp|jpg|jpeg|png)", ft_m.group(0), re.I)
+        if ft_u:
+            featured_thumb = re.sub(r"-\d{2,4}x\d{2,4}(\.(?:webp|jpg|jpeg|png))$", r"\1", ft_u.group(0), flags=re.I)
+
+    # Extract ONLY clean in-article photos inside <article> (skip wp-post-image featured banner & 150x150 related thumbs)
+    web_imgs = []
+    web_image_items = []
     img_tag_pattern = re.compile(
         r"(?:<figure[^>]*>[\s\S]*?<img[^>]+>[\s\S]*?(?:<figcaption[^>]*>([\s\S]*?)</figcaption>)?[\s\S]*?</figure>|<img[^>]+>)",
         re.I,
     )
-    for m in img_tag_pattern.finditer(page_html):
+    for m in img_tag_pattern.finditer(article_html):
         block = m.group(0)
+        if re.search(r"wp-post-image|header-logo|avatar|related", block, re.I):
+            continue
         figcap = clean_html_text(m.group(1) or "")
         url_m = re.search(
             r"https?://dulichcheckin\.com/wp-content/uploads/[^\"'\s>)]+\.(?:webp|jpg|jpeg|png)",
@@ -117,19 +131,22 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
         if not url_m:
             continue
         u = url_m.group(0)
-        if re.search(r"logo|avatar|icon|banner|cropped|\.gif", u, re.I):
+        if re.search(r"logo|avatar|icon|banner|cropped|-150x150|-100x100|\.gif", u, re.I):
             continue
         clean_u = re.sub(r"-\d{2,4}x\d{2,4}(\.(?:webp|jpg|jpeg|png))$", r"\1", u, flags=re.I)
-        if clean_u in imgs:
+        if clean_u == featured_thumb or clean_u in web_imgs:
             continue
         alt_m = re.search(r'alt=["\']([^"\']*)["\']', block, re.I)
         alt_txt = clean_html_text(alt_m.group(1) if alt_m else "")
         fname_slug = Path(urllib.parse.urlparse(clean_u).path).stem.replace("-", " ")
         desc_label = alt_txt or figcap or fname_slug
-        imgs.append(clean_u)
-        image_items.append({"url": clean_u, "desc": f"[Ảnh gốc bài web] {desc_label}", "source": "web"})
+        web_imgs.append(clean_u)
+        web_image_items.append({"url": clean_u, "desc": f"[Ảnh gốc trong bài web] {desc_label}", "source": "web"})
 
-    # 2. Multi-query Vietnamese Image Search (Bing Images) + Gemini Multimodal Vision Verification
+    imgs = list(web_imgs)
+    image_items = list(web_image_items)
+
+    # Also gather 8-10 general destination photos for 2-min Dailymotion video
     loc_short = re.split(r"[:|–—?-]", h1_title)[0].strip()
     if len(loc_short) >= 4:
         vision_ext_items = scrape_bing_vietnamese_images_with_gemini_vision(loc_short, h1_title, headings, imgs)
@@ -138,25 +155,7 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
                 imgs.append(vit["url"])
                 image_items.append(vit)
 
-        # Fallback supplemental Wikipedia VI if Bing returned fewer than 6 images
-        if len(vision_ext_items) < 6:
-            try:
-                vi_url = (
-                    "https://vi.wikipedia.org/w/api.php?action=query&generator=search"
-                    f"&gsrsearch={urllib.parse.quote(loc_short)}&gsrlimit=5&prop=pageimages&pithumbsize=1280&format=json"
-                )
-                vr = requests.get(vi_url, headers=headers, timeout=10)
-                if vr.status_code == 200:
-                    for p in vr.json().get("query", {}).get("pages", {}).values():
-                        iu = (p.get("thumbnail") or {}).get("source", "")
-                        if re.search(r"\.(?:jpg|jpeg|png)$", iu, re.I) and not re.search(r"map|icon|logo|flag", iu, re.I):
-                            if iu not in imgs:
-                                imgs.append(iu)
-                                image_items.append({"url": iu, "desc": f"Ảnh tư liệu {p.get('title', loc_short)}", "source": "wiki"})
-            except Exception:
-                pass
-
-    body = re.sub(r"<(script|style|nav|footer|aside)[\s\S]*?</\1>", " ", page_html, flags=re.I)
+    body = re.sub(r"<(script|style|nav|footer|aside)[\s\S]*?</\1>", " ", article_html, flags=re.I)
     body = re.sub(r"<[^>]+>", " ", body)
     body = html.unescape(body)
     body = re.sub(r"\s+", " ", body).strip()
@@ -164,11 +163,54 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
     return {
         "url": article_url,
         "h1": h1_title,
-        "outline": " | ".join(headings[:18]),
+        "outline": " | ".join(headings[:20]),
         "content": body[:13500],
+        "featured_thumb": featured_thumb or (web_imgs[0] if web_imgs else ""),
+        "web_images": web_imgs,
+        "web_image_items": web_image_items,
         "images": imgs[:36],
         "image_items": image_items[:36],
     }
+
+
+def compute_image_ahash(im) -> int:
+    """Compute 64-bit perceptual average hash (8x8) to detect duplicate/near-duplicate photos across different URLs."""
+    from PIL import Image
+    small = im.convert("L").resize((8, 8), Image.Resampling.BILINEAR)
+    pixels = list(small.getdata())
+    avg = sum(pixels) / 64.0
+    bits = 0
+    for px in pixels:
+        bits = (bits << 1) | (1 if px >= avg else 0)
+    return bits
+
+
+def is_near_duplicate_hash(h: int, existing_hashes: list[int], max_dist: int = 6) -> bool:
+    for eh in existing_hashes:
+        if (h ^ eh).bit_count() <= max_dist:
+            return True
+    return False
+
+
+def has_bottom_title_banner(im) -> bool:
+    """Detect if an image has a solid painted graphic banner bar (like blue blog title bars) across the bottom 12%."""
+    w, h = im.size
+    if w < 420 or h < 260:
+        return True
+    rgb = im.convert("RGB")
+    y_start = int(h * 0.88)
+    blue_banner_px = 0
+    total_px = 0
+    for y in range(y_start, h, 2):
+        for x in range(int(w * 0.15), int(w * 0.85), 4):
+            r, g, b = rgb.getpixel((x, y))
+            total_px += 1
+            # Detect bright cyan/blue brush banner (#1da1f2 / #2ea3f2) or solid saturated banner strip
+            if r < 85 and g > 130 and b > 205:
+                blue_banner_px += 1
+    if total_px > 0 and (blue_banner_px / float(total_px)) > 0.38:
+        return True
+    return False
 
 
 def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: str, headings: list[str], existing_urls: list[str]) -> list[dict]:
@@ -701,51 +743,74 @@ Trả về đúng JSON với 5 khóa:
         return res
 
     if channel == "youtube":
-        img_items = article.get("image_items") or []
-        img_catalog = "\n".join(
-            f"- Ảnh #{idx}: {it.get('desc') or 'Hình ảnh thực tế'}"
-            for idx, it in enumerate(img_items)
+        web_items = article.get("web_image_items") or []
+        web_catalog = "\n".join(
+            f"- Ảnh gốc bài web #{idx}: {it.get('desc') or 'Hình ảnh thực tế trong bài'}"
+            for idx, it in enumerate(web_items)
         )
-        max_img_idx = max(0, len(img_items) - 1)
+        max_web_idx = max(0, len(web_items) - 1)
 
         prompt_ch1 = f"""{base}
 
-KHO ẢNH THẬT ĐÃ QUA AI VISION NHÌN & MÔ TẢ CHI TIẾT (CHỈ SỐ TỪ 0 ĐẾN {max_img_idx}):
-{img_catalog}
+DANH SÁCH ẢNH GỐC CÓ SẴN TRONG BÀI VIẾT WEB (CHỈ SỐ TỪ 0 ĐẾN {max_web_idx}):
+{web_catalog}
 
-NHIỆM VỤ PHẦN 1 CHO PHÓNG SỰ VIDEO [YOUTUBE HD - CHƯƠNG 1 (17 PHÂN CẢNH ĐẦU: GIỚI THIỆU, SỰ TÍCH & KIẾN TRÚC)]:
-1. Hãy viết CHƯƠNG 1 của phóng sự gồm ĐÚNG 17 PHÂN CẢNH ("scenes"), mỗi phân cảnh có lời bình ("narration") dài 18-22 từ (~7 giây/cảnh):
-   - Khai thác toàn diện nửa đầu bài viết: Mở đầu cuốn hút, vị trí địa lý, nguồn gốc lịch sử, sự tích / truyền thuyết thần thoại và đi sâu khám phá từng nét kiến trúc, cổng đền, chính điện, hang động, giếng cổ, cảnh quan đặc sắc.
-2. QUY TẮC CHỌN NGUỒN ẢNH CHO TỪNG CẢNH:
-   - Với các cảnh nói về KIẾN TRÚC, CỔNG ĐỀN, BAN THỜ, TƯỢNG THỜ, HANG ĐỘNG, GIẾNG TIÊN, CẢNH QUAN THỰC TẾ: Đặt `"type": "photo"`, chọn `"image_index"` (0 đến {max_img_idx}) khớp nhất với lời nói, `"ai_prompt_en": ""`.
-   - Với 5-6 phân cảnh kể về **Sự tích / Truyền thuyết / Lịch sử cổ xưa** (những chuyện thần thoại/lịch sử không có ảnh chụp thật): Đặt `"type": "ai_gen"`, `"image_index": -1`, và viết `"ai_prompt_en"` (câu lệnh tiếng Anh 18-28 từ mô tả tranh điện ảnh lịch sử/văn hóa Việt Nam 16:9 để AI vẽ ảnh minh họa).
+NHIỆM VỤ PHẦN 1 CHO PHÓNG SỰ VIDEO [YOUTUBE HD TRÊN 5 PHÚT - CHƯƠNG 1 (21 PHÂN CẢNH ĐẦU: VỊ TRÍ, LỊCH SỬ, SỰ TÍCH & KIẾN TRÚC CHI TIẾT)]:
+1. Hãy viết CHƯƠNG 1 của phóng sự gồm ĐÚNG 21 PHÂN CẢNH ("scenes"), mỗi phân cảnh có lời bình ("narration") dài 19-23 từ (~7.3 giây/cảnh):
+   - Khai thác sâu toàn diện nửa đầu bài viết: Mở đầu ấn tượng, vị trí địa lý, khung cảnh thiên nhiên vùng đất/vịnh biển xung quanh, nguồn gốc lịch sử, sự tích / nhân vật lịch sử thờ phụng và đi sâu khám phá từng công trình kiến trúc (cổng đền, cầu đá, chính điện, ban thờ, động Sơn Trang, Giếng Tiên, thế phong thủy...).
+2. QUY TẮC GÁN ẢNH THẬT KHỚP 100% VỚI TỪNG CÂU VOICE (TUYỆT ĐỐI KHÔNG DÙNG ẢNH AI, CHỈ DÙNG 100% ẢNH CHỤP THẬT):
+   - Với những cảnh khớp trực tiếp với một trong các tấm ảnh gốc bài web ở trên (ưu tiên dùng khoảng 7-8 tấm ảnh gốc từ chỉ số 0 đến {max_web_idx}, MỖI TẤM CHỈ DÙNG ĐÚNG 1 LẦN DUY NHẤT, không lặp lại chỉ số): Đặt `"web_image_index": số_nguyên` (0 đến {max_web_idx}).
+   - Với TẤT CẢ các cảnh còn lại (đặt `"web_image_index": -1`), bạn BẮT BUỘC viết `"search_query_vi"`: Cụm từ khóa tìm kiếm Google/Bing Hình Ảnh bằng Tiếng Việt thật cụ thể, chi tiết (5-10 từ) mô tả ĐÚNG ĐỊA DANH / CÔNG TRÌNH / CẢNH QUAN đang được đọc trong câu "narration" của cảnh đó!
+   - Ví dụ mẫu về "search_query_vi" cực chuẩn theo câu nói:
+     + Khi câu thoại nói về vịnh Bái Tử Long Vân Đồn -> `"vịnh Bái Tử Long Vân Đồn Quảng Ninh"`
+     + Khi câu thoại nói về thương cảng Vân Đồn xưa / bến Cái Rồng -> `"cảng Cái Rồng Vân Đồn Quảng Ninh"`
+     + Khi câu thoại nói về danh tướng Trần Khánh Dư -> `"đền thờ tượng Trần Khánh Dư Vân Đồn"`
+     + Khi câu thoại nói về cổng đền / lối vào đền -> `"cổng đền Cặp Tiên Vân Đồn Quảng Ninh"`
+     + Khi câu thoại nói về Giếng Tiên / mạch nước ngầm -> `"Giếng Tiên đền Cặp Tiên Vân Đồn"`
+     + Khi câu thoại nói về không gian thờ Mẫu / tứ phủ -> `"không gian ban thờ Mẫu tam tứ phủ Việt Nam"`
+   - LƯU Ý: 21 phân cảnh phải có 21 cụm `"search_query_vi"` KHÁC NHAU (mỗi cảnh tìm 1 góc nhìn/chi tiết cụ thể khác nhau để 21 bức ảnh hoàn toàn không trùng lặp!).
 3. Đồng thời viết bộ SEO YouTube:
    - "short_location_name": Tên địa điểm cốt lõi có dấu (3-6 từ).
    - "title": Tiêu đề video YouTube hấp dẫn, chuẩn SEO (50-85 ký tự).
    - "description": Bài cẩm nang mô tả video YouTube chuyên sâu dài 480-600 từ (chia 4-5 đoạn bằng \\n\\n, văn bản thuần không HTML, không tự chèn URL).
    - "tags": Chuỗi 8-12 từ khóa ngăn cách bởi dấu phẩy.
 
-Trả về đúng JSON với 5 khóa: "short_location_name", "title", "scenes", "description", "tags"."""
+Trả về đúng JSON với 5 khóa:
+- "short_location_name": chuỗi
+- "title": chuỗi
+- "scenes": mảng ĐÚNG 21 object [{{"web_image_index": số_nguyên_hoặc_-1, "search_query_vi": "Cụm từ khóa tìm ảnh thật 5-10 từ khớp câu nói", "caption": "Dòng tiêu đề phụ đề 5-10 từ", "narration": "Đoạn lời bình 19-23 từ của biên tập viên"}}]
+- "description": chuỗi
+- "tags": chuỗi"""
 
         res1 = call_gemini_json(prompt_ch1, key_offset=2)
         if not isinstance(res1, dict):
             res1 = {}
         scenes_ch1 = [s for s in (res1.get("scenes") or []) if isinstance(s, dict) and str(s.get("narration", "")).strip()]
+        used_web_in_ch1 = {s.get("web_image_index") for s in scenes_ch1 if isinstance(s.get("web_image_index"), int) and s.get("web_image_index") >= 0}
+        remaining_web_str = ", ".join(str(i) for i in range(len(web_items)) if i not in used_web_in_ch1) or "Không còn"
 
         prompt_ch2 = f"""{base}
 
-KHO ẢNH THẬT ĐÃ QUA AI VISION NHÌN & MÔ TẢ CHI TIẾT (CHỈ SỐ TỪ 0 ĐẾN {max_img_idx}):
-{img_catalog}
+DANH SÁCH ẢNH GỐC BÀI WEB CÒN CHƯA DÙNG Ở CHƯƠNG 1 (CHỈ ĐƯỢC CHỌN TRONG CÁC SỐ NÀY: [{remaining_web_str}]):
+{web_catalog}
 
-NHIỆM VỤ PHẦN 2 CHO PHÓNG SỰ VIDEO [YOUTUBE HD - CHƯƠNG 2 (17 PHÂN CẢNH TIẾP THEO: CẨM NANG ĐI LỄ, SẮM LỄ, VĂN KHẤN & KINH NGHIỆM THỰC TẾ)]:
-1. Tiếp nối Chương 1 (đã giới thiệu lịch sử & kiến trúc), hãy viết tiếp CHƯƠNG 2 gồm ĐÚNG 17 PHÂN CẢNH ("scenes"), mỗi phân cảnh có lời bình ("narration") dài 18-22 từ (~7 giây/cảnh):
-   - Khai thác toàn diện nửa sau bài viết: Thời điểm đi lễ/tham quan đẹp nhất, giờ mở cửa, giá vé, hướng dẫn đường đi/di chuyển, hướng dẫn sắm lễ vật chay/mặn chi tiết, lưu ý khi dâng hương đọc văn khấn, trang phục ứng xử, ẩm thực đặc sản xung quanh và lời kết chào khán giả.
-2. QUY TẮC CHỌN NGUỒN ẢNH CHO TỪNG CẢNH:
-   - Với khoảng 6-8 phân cảnh nói về **Hướng dẫn sắm lễ / Mâm lễ vật dâng hương**, **Nghi thức đọc văn khấn**, **Chuẩn bị trang phục lịch sự / Hành trang khởi hành / Phương tiện di chuyển / Ẩm thực đặc sản** (không cần ảnh chụp địa điểm thật): Đặt `"type": "ai_gen"`, `"image_index": -1`, và viết `"ai_prompt_en"` (câu lệnh tiếng Anh 18-28 từ mô tả ảnh thực tế 16:9 chuẩn văn hóa Việt Nam để AI vẽ ảnh minh họa).
-   - Với các cảnh còn lại nói về không gian tham quan, đường đi, lễ hội thực tế tại địa điểm: Đặt `"type": "photo"`, chọn `"image_index"` (0 đến {max_img_idx}) phù hợp nhất (ưu tiên các ảnh từ giữa đến cuối kho ảnh), `"ai_prompt_en": ""`.
+NHIỆM VỤ PHẦN 2 CHO PHÓNG SỰ VIDEO [YOUTUBE HD TRÊN 5 PHÚT - CHƯƠNG 2 (21 PHÂN CẢNH TIẾP THEO: LỄ HỘI, ĐƯỜNG ĐI, SẮM LỄ, VĂN KHẤN & ĐỊA ĐIỂM LÂN CẬN)]:
+1. Tiếp nối Chương 1, hãy viết tiếp CHƯƠNG 2 gồm ĐÚNG 21 PHÂN CẢNH ("scenes"), mỗi phân cảnh có lời bình ("narration") dài 19-23 từ (~7.3 giây/cảnh):
+   - Khai thác sâu toàn diện nửa sau bài viết: Lễ hội truyền thống, thời điểm đi lễ đẹp nhất, giờ mở cửa, hướng dẫn lộ trình di chuyển (cao tốc, cầu, bến cảng), hướng dẫn chi tiết từng loại lễ vật khi sắm lễ (lễ chay hương hoa ngũ quả, lễ mặn, lễ Sơn Trang Cô Bé Cửa Suốt, lễ ban Công Đồng), kinh nghiệm xin nước Giếng Tiên và đọc văn khấn, lưu ý trang phục ứng xử, các địa điểm tham quan lân cận được nhắc trong bài (như Đền Cửa Ông, Chùa Cái Bầu, Bãi Dài Vân Đồn, Đảo Quan Lạn...) và lời kết.
+2. QUY TẮC GÁN ẢNH THẬT KHỚP 100% VỚI TỪNG CÂU VOICE (42 CẢNH = 42 BỨC ẢNH CHỤP THẬT KHÁC NHAU):
+   - Hãy sử dụng nốt các tấm ảnh gốc bài web còn lại trong danh sách `[{remaining_web_str}]` (mỗi tấm chỉ dùng đúng 1 lần ở cảnh phù hợp nhất, đặt `"web_image_index": số_nguyên`).
+   - Với tất cả các cảnh còn lại (đặt `"web_image_index": -1`), hãy viết `"search_query_vi"` (cụm từ khóa tìm ảnh chụp thật 5-10 từ trên Google/Bing khớp chính xác 100% với vật thể / địa điểm đang được nói trong câu "narration" của cảnh đó):
+     + Khi nói về lễ hội đền -> `"lễ hội đền Cặp Tiên Vân Đồn Quảng Ninh"`
+     + Khi nói về cao tốc Hạ Long Vân Đồn / đường đi -> `"cao tốc Hạ Long Vân Đồn Quảng Ninh"`, `"cầu Vân Tiên Vân Đồn Quảng Ninh"`
+     + Khi nói về sắm lễ chay (hoa tươi, trầu cau, ngũ quả) -> `"mâm lễ chay hoa tươi ngũ quả đi lễ đền chùa"`
+     + Khi nói về sắm lễ Sơn Trang / lễ Cô Bé -> `"mâm lễ Sơn Trang dâng hương truyền thống Việt Nam"`
+     + Khi nói về sắm lễ mặn / xôi gà / oản lễ -> `"mâm lễ xôi gà dâng lễ đền chùa Việt Nam"`
+     + Khi nói về nghi thức dâng hương / đọc văn khấn -> `"du khách thành tâm dâng hương tại đền cổ Việt Nam"`
+     + Khi nói về địa điểm tham quan lân cận (nếu bài nhắc Đền Cửa Ông, Chùa Cái Bầu, Bãi Dài...) -> ghi ĐÚNG tên địa điểm lân cận đó làm từ khóa tìm ảnh (VD: `"Đền Cửa Ông Cẩm Phả Quảng Ninh"`, `"Chùa Cái Bầu Thiền Viện Trúc Lâm Giác Tâm Vân Đồn"`, `"bãi biển Bãi Dài Vân Đồn Quảng Ninh"`).
+   - 21 phân cảnh phải có 21 cụm `"search_query_vi"` hoàn toàn khác nhau!
 
 Trả về đúng JSON với 1 khóa duy nhất:
-- "scenes": mảng 17 object [{{"type": "photo" hoặc "ai_gen", "image_index": số_nguyên, "ai_prompt_en": "Chuỗi tiếng Anh nếu ai_gen", "caption": "Dòng tiêu đề phụ đề 5-10 từ", "narration": "Đoạn lời bình 18-22 từ của biên tập viên"}}]"""
+- "scenes": mảng ĐÚNG 21 object [{{"web_image_index": số_nguyên_hoặc_-1, "search_query_vi": "Cụm từ khóa tìm ảnh thật 5-10 từ khớp câu nói", "caption": "Dòng tiêu đề phụ đề 5-10 từ", "narration": "Đoạn lời bình 19-23 từ của biên tập viên"}}]"""
 
         res2 = call_gemini_json(prompt_ch2, key_offset=4)
         if not isinstance(res2, dict):
@@ -1139,53 +1204,63 @@ def build_youtube_thumbnail_1280x720(image_urls: list[str], yt_title: str, short
     return t_url
 
 
-def generate_ai_illustration_raw_image(ai_prompt_en: str, scene_idx: int):
-    """Generate a 1280x720 HD 16:9 illustration for legends, offerings, prayers, or travel tips."""
+def search_and_download_scene_real_photo(query_vi: str, short_loc: str, used_urls: set, used_hashes: list[int]):
+    """Search Bing Images for a scene-specific Vietnamese query and return a 100% unique, clean real photograph (PIL.Image, url)."""
     import io
     from PIL import Image
 
-    clean_prompt = (
-        f"Photorealistic cinematic 16:9 Vietnamese cultural & travel photography, {ai_prompt_en.strip()}, "
-        "warm natural lighting, ultra detailed, 8k resolution, no text, no watermark, no letters"
+    b_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
+    }
+    bad_patterns = re.compile(
+        r"dulichcheckin\.com|logo|icon|avatar|banner|shopee|lazada|tiki|tiktok|sendo|map|bando|chart|poster|flyer|infographic|\.svg|\.gif",
+        re.I,
     )
 
-    # 1. Try Gemini Native Image Generation (3.1-flash-image / 3.1-flash-lite-image / 2.5-flash-image) with rotating keys
-    if GEMINI_KEYS:
-        img_models = ["gemini-3.1-flash-image", "gemini-3.1-flash-lite-image", "gemini-2.5-flash-image"]
-        for im_idx, im_model in enumerate(img_models):
-            key = GEMINI_KEYS[(scene_idx + im_idx) % len(GEMINI_KEYS)]
-            g_url = f"https://generativelanguage.googleapis.com/v1beta/models/{im_model}:generateContent?key={urllib.parse.quote(key)}"
-            g_payload = {
-                "contents": [{"parts": [{"text": f"Generate a realistic 16:9 horizontal photo without any text: {clean_prompt}"}]}],
-                "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-            }
-            try:
-                gr = requests.post(g_url, json=g_payload, timeout=25)
-                if gr.status_code == 200:
-                    parts = gr.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                    for pt in parts:
-                        inl = pt.get("inlineData")
-                        if inl and inl.get("data"):
-                            img_bytes = base64.b64decode(inl["data"])
-                            return Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            except Exception:
-                continue
+    search_variants = [query_vi.strip()]
+    if short_loc.lower() not in query_vi.lower():
+        search_variants.append(f"{query_vi.strip()} {short_loc}")
+    search_variants.append(f"{short_loc} du lịch danh thắng Việt Nam")
 
-    # 2. Try Pollinations Flux 1280x720 HD (100% free, no API key required)
-    seed = 2026 + scene_idx * 53
-    for model_param in ("&model=flux", ""):
-        p_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(clean_prompt[:380])}?width=1280&height=720&seed={seed}&nologo=true{model_param}"
+    for q in search_variants:
+        if not q:
+            continue
         try:
-            pr = requests.get(p_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=28)
-            if pr.status_code == 200 and len(pr.content) > 10000:
-                return Image.open(io.BytesIO(pr.content)).convert("RGB")
+            b_url = f"https://www.bing.com/images/search?q={urllib.parse.quote(q)}&form=HDRSC2&first=1"
+            r = requests.get(b_url, headers=b_headers, timeout=8)
+            if r.status_code != 200:
+                continue
+            matches = re.findall(r"murl&quot;:&quot;(https?://[^&]+?\.(?:jpg|jpeg|png|webp))&quot;", r.text, flags=re.I)
+            for mu in matches[:14]:
+                u = html.unescape(mu).strip()
+                if u in used_urls or bad_patterns.search(u):
+                    continue
+                try:
+                    ir = requests.get(u, headers=b_headers, timeout=6)
+                    if ir.status_code == 200 and len(ir.content) > 10000:
+                        im = Image.open(io.BytesIO(ir.content)).convert("RGB")
+                        w, h = im.size
+                        if w < 460 or h < 280 or (w / float(h)) > 2.6 or (h / float(w)) > 1.9:
+                            continue
+                        if has_bottom_title_banner(im):
+                            continue
+                        ah = compute_image_ahash(im)
+                        if is_near_duplicate_hash(ah, used_hashes, max_dist=6):
+                            continue
+                        used_urls.add(u)
+                        used_hashes.append(ah)
+                        return im, u
+                except Exception:
+                    continue
         except Exception:
             continue
-    return None
+    return None, ""
 
 
 def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_sec: float, out_mp4: Path, scenes: list | None = None, short_loc: str = "Du lịch Việt Nam", max_scenes: int = 16):
-    """Build a crisp 1280x720 HD video with 100% uncropped images, AI illustrations, blurred backdrop, TV captions & smooth transitions."""
+    """Build a crisp 1280x720 HD video with 100% uncropped real photos (web photos + scene-by-scene search), zero AI images, zero duplicate photos."""
+    import io
     from PIL import Image
 
     headers = {
@@ -1193,70 +1268,91 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
         "Referer": "https://dulichcheckin.com/",
     }
 
-    # Build ordered list of (source_url_or_ai, weight_words, caption_text, zoom_center, ai_prompt_en)
-    ordered_specs = []
-    if scenes and isinstance(scenes, list) and image_urls:
-        used_indices = set()
-        for sc in scenes:
-            if not isinstance(sc, dict):
-                continue
-            sc_type = str(sc.get("type") or "photo").strip().lower()
-            ai_prompt = str(sc.get("ai_prompt_en") or "").strip()
-            words = max(5, len(str(sc.get("narration", "")).split()))
-            cap = str(sc.get("caption") or sc.get("narration") or short_loc).strip()
-
-            if sc_type == "ai_gen" and ai_prompt:
-                fallback_u = image_urls[len(ordered_specs) % len(image_urls)]
-                ordered_specs.append((fallback_u, words, cap, False, ai_prompt))
-                continue
-
-            idx = sc.get("image_index", 0)
-            is_second_view = False
-            if not isinstance(idx, int) or idx < 0 or idx >= len(image_urls):
-                unused = [i for i in range(len(image_urls)) if i not in used_indices]
-                idx = unused[0] if unused else (len(ordered_specs) % len(image_urls))
-            elif idx in used_indices:
-                unused = [i for i in range(len(image_urls)) if i not in used_indices]
-                if unused:
-                    idx = unused[0]
-                else:
-                    is_second_view = True
-            used_indices.add(idx)
-            ordered_specs.append((image_urls[idx], words, cap, is_second_view, ""))
-
-    if not ordered_specs:
-        for u in image_urls[:15]:
-            ordered_specs.append((u, 18, short_loc, False, ""))
+    used_urls = set()
+    used_hashes: list[int] = []
+    used_web_indices = set()
 
     dl_imgs = []
     weights = []
-    total_spec_count = min(max_scenes, len(ordered_specs))
-    for idx, (u, w, cap, z_center, ai_prompt) in enumerate(ordered_specs[:max_scenes]):
-        try:
-            raw_im = None
-            src_label = u
-            if ai_prompt:
-                raw_im = generate_ai_illustration_raw_image(ai_prompt, idx)
-                if raw_im is not None:
-                    src_label = f"[AI_GENERATED] {ai_prompt[:45]}..."
-            if raw_im is None:
-                r = requests.get(u, headers=headers, timeout=20)
-                if r.status_code == 200 and len(r.content) > 5000:
-                    raw_p = WORK_DIR / f"raw_{idx}"
-                    raw_p.write_bytes(r.content)
-                    raw_im = Image.open(raw_p).convert("RGB")
-                    raw_p.unlink(missing_ok=True)
 
-            if raw_im is not None:
-                tv_frame = render_tv_frame_1280x720(raw_im, cap, short_loc, len(dl_imgs) + 1, total_spec_count, zoom_center=z_center)
-                p = WORK_DIR / f"slide_{idx}.jpg"
-                tv_frame.save(p, "JPEG", quality=93)
-                dl_imgs.append(p)
-                weights.append(w)
-                print(f"Scene #{len(dl_imgs)} ({w} words | zoom={z_center} | '{cap[:35]}') -> {src_label}")
-        except Exception as e:
-            print(f"Skip scene #{idx} ({u}): {e}")
+    active_scenes = (scenes or [])[:max_scenes]
+    if not active_scenes:
+        active_scenes = [{"web_image_index": i, "caption": short_loc, "narration": short_loc} for i in range(min(15, len(image_urls)))]
+
+    total_spec_count = len(active_scenes)
+
+    for idx, sc in enumerate(active_scenes):
+        if not isinstance(sc, dict):
             continue
+        words = max(5, len(str(sc.get("narration", "")).split()))
+        cap = str(sc.get("caption") or sc.get("narration") or short_loc).strip()
+        web_idx = sc.get("web_image_index") if "web_image_index" in sc else sc.get("image_index", -1)
+        search_q = str(sc.get("search_query_vi") or "").strip()
+
+        raw_im = None
+        chosen_url = ""
+
+        # 1. Try authentic in-article web photo first if valid and not yet used
+        if isinstance(web_idx, int) and 0 <= web_idx < len(image_urls) and web_idx not in used_web_indices:
+            candidate_u = image_urls[web_idx]
+            if candidate_u not in used_urls:
+                try:
+                    r = requests.get(candidate_u, headers=headers, timeout=15)
+                    if r.status_code == 200 and len(r.content) > 6000:
+                        im = Image.open(io.BytesIO(r.content)).convert("RGB")
+                        ah = compute_image_ahash(im)
+                        if not is_near_duplicate_hash(ah, used_hashes, max_dist=5):
+                            raw_im = im
+                            chosen_url = f"[WEB #{web_idx}] {candidate_u}"
+                            used_web_indices.add(web_idx)
+                            used_urls.add(candidate_u)
+                            used_hashes.append(ah)
+                except Exception:
+                    pass
+
+        # 2. If scene needs an external photo (or web_idx was -1 / already used), search Bing Images for this scene's exact query!
+        if raw_im is None and search_q:
+            raw_im, ext_u = search_and_download_scene_real_photo(search_q, short_loc, used_urls, used_hashes)
+            if raw_im is not None:
+                chosen_url = f"[SEARCH: '{search_q}'] {ext_u}"
+
+        # 3. Fallback: pick any remaining unused photo from image_urls pool
+        if raw_im is None:
+            for pool_i, pool_u in enumerate(image_urls):
+                if pool_u in used_urls:
+                    continue
+                try:
+                    r = requests.get(pool_u, headers=headers, timeout=12)
+                    if r.status_code == 200 and len(r.content) > 6000:
+                        im = Image.open(io.BytesIO(r.content)).convert("RGB")
+                        if "dulichcheckin.com" not in pool_u and has_bottom_title_banner(im):
+                            continue
+                        ah = compute_image_ahash(im)
+                        if not is_near_duplicate_hash(ah, used_hashes, max_dist=5):
+                            raw_im = im
+                            chosen_url = f"[POOL #{pool_i}] {pool_u}"
+                            used_web_indices.add(pool_i)
+                            used_urls.add(pool_u)
+                            used_hashes.append(ah)
+                            break
+                except Exception:
+                    continue
+
+        # 4. Last-resort search with caption + short_loc if pool is exhausted
+        if raw_im is None:
+            raw_im, ext_u = search_and_download_scene_real_photo(f"{cap} {short_loc}", short_loc, used_urls, used_hashes)
+            if raw_im is not None:
+                chosen_url = f"[CAPTION_SEARCH: '{cap}'] {ext_u}"
+
+        if raw_im is not None:
+            tv_frame = render_tv_frame_1280x720(raw_im, cap, short_loc, len(dl_imgs) + 1, total_spec_count, zoom_center=False)
+            p = WORK_DIR / f"slide_{idx}.jpg"
+            tv_frame.save(p, "JPEG", quality=93)
+            dl_imgs.append(p)
+            weights.append(w)
+            print(f"Scene #{len(dl_imgs)}/{total_spec_count} ({w} words | '{cap[:38]}') -> {chosen_url}")
+        else:
+            print(f"Warning: Could not resolve unique photo for scene #{idx+1} ('{cap}')")
 
     if not dl_imgs:
         raise RuntimeError("Could not download any article images from dulichcheckin.com")
@@ -1722,15 +1818,15 @@ def main():
 
             yt_mp4_path = WORK_DIR / f"{slug}-{file_tag}.mp4"
             build_hd_video_from_images(
-                article["images"],
+                article.get("web_images") or article["images"],
                 yt_mp3_path,
                 yt_duration,
                 yt_mp4_path,
                 yt_data.get("scenes"),
                 yt_short_loc,
-                max_scenes=40,
+                max_scenes=44,
             )
-            print(f"Built Dedicated 36-Scene HD MP4: {yt_mp4_path.name} ({yt_mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
+            print(f"Built Dedicated 42-Scene Real-Photo HD MP4: {yt_mp4_path.name} ({yt_mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
             yt_mp4_url, _ = upload_mp3_to_github_release(yt_mp4_path)
 
             if is_preview:
@@ -1744,7 +1840,8 @@ def main():
                 })
             else:
                 yt_thumb_jpg = WORK_DIR / f"{slug}-youtube-thumb.jpg"
-                yt_thumb_url = build_youtube_thumbnail_1280x720(article["images"], yt_title, yt_short_loc, yt_thumb_jpg)
+                thumb_pool = ([article["featured_thumb"]] if article.get("featured_thumb") else []) + article["images"]
+                yt_thumb_url = build_youtube_thumbnail_1280x720(thumb_pool, yt_title, yt_short_loc, yt_thumb_jpg)
                 print(f"Prepared YouTube 5-Min HD Video Package: '{yt_title}' ({yt_duration:.1f}s) | MP4: {yt_mp4_url} | Thumb: {yt_thumb_url}")
 
                 update_status_json(article_url, "youtube", {
