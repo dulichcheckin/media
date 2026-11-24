@@ -39,6 +39,15 @@ WORK_DIR = ROOT_DIR / "_tmp_media"
 WORK_DIR.mkdir(exist_ok=True)
 
 
+def to_clean_unaccented_title(text: str) -> str:
+    """Convert Vietnamese title to clean unaccented letters/numbers only (for Castbox 100% clean SEO URL)."""
+    s = unicodedata.normalize("NFD", text or "")
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = s.replace("đ", "d").replace("Đ", "D")
+    s = re.sub(r"[^a-zA-Z0-9\s]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def to_seo_slug(text: str) -> str:
     s = unicodedata.normalize("NFD", text or "du-lich-viet-nam")
     s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
@@ -401,7 +410,9 @@ def format_duration_hms(seconds: float) -> str:
 def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: str, mp3_url: str, mp3_size: int, duration_sec: float):
     rss_file = ROOT_DIR / f"{channel}.xml"
     is_spotify = (channel == "spotify")
-    show_title = "Du Lịch Checkin - Trải Nghiệm Việt Nam" if is_spotify else "Cẩm Nang Du Lịch Checkin"
+    show_title = "Du Lịch Checkin - Trải Nghiệm Việt Nam" if is_spotify else "Cam Nang Du Lich Checkin"
+    if not is_spotify:
+        ep_title = to_clean_unaccented_title(ep_title)
     show_desc = (
         "Podcast kể chuyện trải nghiệm thực tế, khám phá điểm đến, văn hóa và ẩm thực khắp ba miền Việt Nam cùng Du Lịch Checkin."
         if is_spotify
