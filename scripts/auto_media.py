@@ -81,7 +81,7 @@ def clean_html_text(raw: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
+def scrape_article(article_url: str, fallback_h1: str = "", skip_pre_bing: bool = False) -> dict:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     resp = requests.get(article_url, headers=headers, timeout=30)
     resp.raise_for_status()
@@ -146,9 +146,9 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
     imgs = list(web_imgs)
     image_items = list(web_image_items)
 
-    # Also gather 8-10 general destination photos for 2-min Dailymotion video
+    # Only pre-gather general Bing photos for 2-min Dailymotion video (skip for 42-scene YouTube/Preview to save 100% Gemini RPM quota!)
     loc_short = re.split(r"[:|–—?-]", h1_title)[0].strip()
-    if len(loc_short) >= 4:
+    if len(loc_short) >= 4 and not skip_pre_bing:
         vision_ext_items = scrape_bing_vietnamese_images_with_gemini_vision(loc_short, h1_title, headings, imgs)
         for vit in vision_ext_items:
             if vit["url"] not in imgs:
@@ -362,41 +362,39 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
         "gemini-flash-lite-latest",
     ]
     last_err = ""
-    for round_try in range(3):
+    for round_try in range(4):
         if round_try > 0:
-            wait_sec = 8 * round_try
-            print(f"All models busy on round {round_try}, waiting {wait_sec}s before resuming this step...")
+            wait_sec = 12 * round_try
+            print(f"All models busy on round {round_try}, cooling down {wait_sec}s before resuming this step...")
             time.sleep(wait_sec)
         for m_idx, model in enumerate(models):
-            # Try 2 rotated keys per model so we move quickly through flagship models before waiting
-            for k_try in range(min(3, len(GEMINI_KEYS))):
-                key = GEMINI_KEYS[(key_offset + m_idx * 2 + k_try + round_try) % len(GEMINI_KEYS)]
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
-                payload = {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": 0.7,
-                        "responseMimeType": "application/json",
-                    },
-                }
-                try:
-                    r = requests.post(url, json=payload, timeout=110)
-                    if r.status_code == 200:
-                        txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.I).strip()
-                        parsed = json.loads(txt)
-                        if isinstance(parsed, list):
-                            if len(parsed) > 0 and isinstance(parsed[0], dict) and ("title" in parsed[0] or "speech_script" in parsed[0] or "scenes" in parsed[0]):
-                                return parsed[0]
-                            return {"scenes": parsed}
-                        print(f"call_gemini_json succeeded on model: {model}")
-                        return parsed
-                    last_err = f"HTTP {r.status_code} ({model}): {r.text[:160]}"
-                    if r.status_code in (429, 503):
-                        time.sleep(2)
-                except Exception as e:
-                    last_err = f"{model} parse/net err: {e}"
-                    time.sleep(2)
+            key = GEMINI_KEYS[(key_offset + m_idx + round_try) % len(GEMINI_KEYS)]
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "responseMimeType": "application/json",
+                },
+            }
+            try:
+                r = requests.post(url, json=payload, timeout=110)
+                if r.status_code == 200:
+                    txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.I).strip()
+                    parsed = json.loads(txt)
+                    if isinstance(parsed, list):
+                        if len(parsed) > 0 and isinstance(parsed[0], dict) and ("title" in parsed[0] or "speech_script" in parsed[0] or "scenes" in parsed[0]):
+                            return parsed[0]
+                        return {"scenes": parsed}
+                    print(f"call_gemini_json succeeded on model: {model}")
+                    return parsed
+                last_err = f"HTTP {r.status_code} ({model}): {r.text[:160]}"
+                if r.status_code in (429, 503):
+                    time.sleep(5)
+            except Exception as e:
+                last_err = f"{model} parse/net err: {e}"
+                time.sleep(3)
     raise RuntimeError(f"Gemini JSON failed: {last_err}")
 
 
@@ -776,9 +774,17 @@ Trả về đúng JSON với 5 khóa:
 - "description": chuỗi
 - "tags": chuỗi"""
 
-        res1 = call_gemini_json(prompt_ch1, key_offset=2)
-        if not isinstance(res1, dict):
-            res1 = {}
+        ckpt = (read_status_json().get(article["url"]) or {}).get("yt_checkpoint") or {}
+        if ckpt.get("res1") and isinstance(ckpt.get("res1"), dict) and ckpt["res1"].get("scenes"):
+            print("Resuming Chapter 1 from saved checkpoint in status.json!")
+            res1 = ckpt["res1"]
+        else:
+            res1 = call_gemini_json(prompt_ch1, key_offset=2)
+            if not isinstance(res1, dict):
+                res1 = {}
+            ckpt["res1"] = res1
+            update_status_json(article["url"], "yt_checkpoint", ckpt)
+
         scenes_ch1 = [s for s in (res1.get("scenes") or []) if isinstance(s, dict) and str(s.get("narration", "")).strip()]
         used_web_in_ch1 = {s.get("web_image_index") for s in scenes_ch1 if isinstance(s.get("web_image_index"), int) and s.get("web_image_index") >= 0}
         remaining_web_str = ", ".join(str(i) for i in range(len(web_items)) if i not in used_web_in_ch1) or "Không còn"
@@ -806,9 +812,16 @@ NHIỆM VỤ PHẦN 2 CHO PHÓNG SỰ VIDEO [YOUTUBE HD TRÊN 5 PHÚT - CHƯƠNG
 Trả về đúng JSON với 1 khóa duy nhất:
 - "scenes": mảng ĐÚNG 21 object [{{"web_image_index": số_nguyên_hoặc_-1, "search_query_vi": "Cụm từ khóa tìm ảnh thật 5-10 từ khớp câu nói", "caption": "Dòng tiêu đề phụ đề 5-10 từ", "narration": "Đoạn lời bình 19-23 từ của biên tập viên"}}]"""
 
-        res2 = call_gemini_json(prompt_ch2, key_offset=4)
-        if not isinstance(res2, dict):
-            res2 = {}
+        if ckpt.get("res2") and isinstance(ckpt.get("res2"), dict) and ckpt["res2"].get("scenes"):
+            print("Resuming Chapter 2 from saved checkpoint in status.json!")
+            res2 = ckpt["res2"]
+        else:
+            res2 = call_gemini_json(prompt_ch2, key_offset=4)
+            if not isinstance(res2, dict):
+                res2 = {}
+            ckpt["res2"] = res2
+            update_status_json(article["url"], "yt_checkpoint", ckpt)
+
         scenes_ch2 = [s for s in (res2.get("scenes") or []) if isinstance(s, dict) and str(s.get("narration", "")).strip()]
 
         all_scenes = scenes_ch1 + scenes_ch2
@@ -1828,7 +1841,7 @@ def main():
 
     ensure_cover_images()
     print(f"Scraping article: {article_url}")
-    article = scrape_article(article_url, h1_override)
+    article = scrape_article(article_url, h1_override, skip_pre_bing=(channel_arg in ("youtube", "preview")))
     slug = to_seo_slug(article["h1"])
     print(f"Article H1: {article['h1']} | Images found: {len(article['images'])}")
 
@@ -1900,16 +1913,33 @@ def main():
             yt_full_desc = enforce_varied_bare_link_plain(yt_raw_desc, article_url, yt_short_loc, max_chars=4600)
             yt_tags = safe_str(yt_data.get("tags")) or f"du lịch checkin, {yt_short_loc}, du lịch việt nam"
 
-            # Build dedicated ~4.5 - 5 minute (2-chapter, 34-38 scenes) HD video
+            # Build dedicated ~4.5 - 5 minute (2-chapter, 42 scenes) HD video with Persistent Audio Checkpoint
             file_tag = "preview-5min" if is_preview else "youtube-5min"
             yt_mp3_path = WORK_DIR / f"{slug}-{file_tag}.mp3"
-            style_dir = (
-                "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
-            )
-            ch1_speech = safe_str(yt_data.get("chapter1_speech") or yt_data.get("speech_script"), " ")
-            ch2_speech = safe_str(yt_data.get("chapter2_speech"), " ")
-            yt_duration = call_gemini_tts_two_chapters_to_mp3(ch1_speech, ch2_speech, style_dir, yt_mp3_path, key_offset=3)
-            print(f"Generated Dedicated 5-Min Voice MP3 (2 Chapters + Studio BGM): {yt_mp3_path.name} ({yt_duration:.1f}s)")
+            ckpt = (read_status_json().get(article_url) or {}).get("yt_checkpoint") or {}
+            yt_duration = 0.0
+            if ckpt.get("voice_mp3_url") and ckpt.get("voice_duration_sec"):
+                try:
+                    vr = requests.get(ckpt["voice_mp3_url"], timeout=45)
+                    if vr.status_code == 200 and len(vr.content) > 50000:
+                        yt_mp3_path.write_bytes(vr.content)
+                        yt_duration = float(ckpt["voice_duration_sec"])
+                        print(f"Resumed 5-Min Voice MP3 from checkpoint ({yt_duration:.1f}s): {ckpt['voice_mp3_url']}")
+                except Exception:
+                    yt_duration = 0.0
+
+            if yt_duration <= 0.0:
+                style_dir = (
+                    "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
+                )
+                ch1_speech = safe_str(yt_data.get("chapter1_speech") or yt_data.get("speech_script"), " ")
+                ch2_speech = safe_str(yt_data.get("chapter2_speech"), " ")
+                yt_duration = call_gemini_tts_two_chapters_to_mp3(ch1_speech, ch2_speech, style_dir, yt_mp3_path, key_offset=3)
+                print(f"Generated Dedicated 5-Min Voice MP3 (2 Chapters + Studio BGM): {yt_mp3_path.name} ({yt_duration:.1f}s)")
+                voice_rel_url, _ = upload_mp3_to_github_release(yt_mp3_path)
+                ckpt["voice_mp3_url"] = voice_rel_url
+                ckpt["voice_duration_sec"] = round(yt_duration, 1)
+                update_status_json(article_url, "yt_checkpoint", ckpt)
 
             yt_mp4_path = WORK_DIR / f"{slug}-{file_tag}.mp4"
             build_hd_video_from_images(
