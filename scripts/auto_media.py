@@ -10,6 +10,7 @@ import array
 import base64
 import datetime
 import email.utils
+import hashlib
 import html
 import json
 import math
@@ -31,6 +32,10 @@ GH_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GEMINI_KEYS = [k.strip() for k in os.environ.get("GEMINI_KEYS", "").split(",") if k.strip()]
 DM_API_KEY = os.environ.get("DM_API_KEY", "").strip()
 DM_API_SECRET = os.environ.get("DM_API_SECRET", "").strip()
+ARCHIVE_ACCESS_KEY = os.environ.get("ARCHIVE_ACCESS_KEY", "").strip()
+ARCHIVE_SECRET_KEY = os.environ.get("ARCHIVE_SECRET_KEY", "").strip()
+BLUESKY_HANDLE = os.environ.get("BLUESKY_HANDLE", "").strip()
+BLUESKY_PASSWORD = os.environ.get("BLUESKY_PASSWORD", "").strip()
 
 PAGES_BASE = f"https://{REPO.split('/')[0]}.github.io/{REPO.split('/')[1]}"
 RELEASE_TAG = "audio-files"
@@ -544,6 +549,41 @@ Trả về đúng JSON với 5 khóa:
             res["description"] = article["content"][:2200]
         return res
 
+    if channel == "youtube":
+        prompt = f"""{base}
+
+NHIỆM VỤ RIÊNG CHO VIDEO [YOUTUBE HD - TIÊU ĐỀ CTR CAO & BÀI MÔ TẢ SEO 500 TỪ]:
+- "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
+- "title": Tiêu đề video YouTube hấp dẫn, chuẩn SEO, có dấu tiếng Việt (50-85 ký tự, cấu trúc khác hoàn toàn tiêu đề bài gốc và Dailymotion).
+- "description": Bài cẩm nang mô tả video YouTube chuyên sâu dài khoảng 450-600 từ (chia 4-5 đoạn văn rõ ràng bằng \\n\\n, văn bản thuần KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL vì hệ thống sẽ tự đặt link trần chuẩn SEO). Đi sâu phân tích trải nghiệm, lịch sử/kiến trúc, kinh nghiệm di chuyển và lưu ý thực tế từ bài gốc.
+- "tags": Chuỗi 8-12 từ khóa tiếng Việt chuẩn SEO YouTube ngăn cách bởi dấu phẩy.
+
+Trả về đúng JSON với 4 khóa: "short_location_name", "title", "description", "tags"."""
+        return call_gemini_json(prompt, key_offset=3)
+
+    if channel == "bluesky":
+        prompt = f"""{base}
+
+NHIỆM VỤ RIÊNG CHO MẠNG XÃ HỘI VIDEO [BLUESKY - BÀI CHIA SẺ SÚC TÍCH KÈM VIDEO HD]:
+- "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
+- "title": Tiêu đề ngắn gọn giới thiệu video điểm đến (45-70 ký tự).
+- "description": Đoạn chia sẻ thực tế súc tích, cuốn hút dài khoảng 145-190 ký tự (tuyệt đối không quá 195 ký tự để vừa khung 300 ký tự của Bluesky), bắt buộc có nhắc tự nhiên cụm từ "short_location_name" bên trong câu văn. Không dùng emoji, không sáo rỗng, không tự chèn URL.
+
+Trả về đúng JSON với 3 khóa: "short_location_name", "title", "description"."""
+        return call_gemini_json(prompt, key_offset=4)
+
+    if channel == "archive":
+        prompt = f"""{base}
+
+NHIỆM VỤ RIÊNG CHO THƯ VIỆN LƯU TRỮ SỐ [INTERNET ARCHIVE (ARCHIVE.ORG) - BÀI VIẾT HTML SEO 500-650 TỪ]:
+- "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
+- "title": Tiêu đề tư liệu video & cẩm nang khám phá có dấu tiếng Việt chuẩn mực (50-85 ký tự, khác tiêu đề YouTube và Dailymotion).
+- "description": Bài viết chuyên khảo & hướng dẫn du lịch dài khoảng 500-650 từ định dạng HTML sạch (chia 4-5 đoạn bằng thẻ <p>...</p>, có thể dùng <h2>/<h3> và <ul>/<li>). Bám sát 100% thông tin bài gốc nhưng biên tập với góc nhìn tư liệu văn hóa - du lịch hoàn toàn mới, KHÔNG tự chèn URL (hệ thống sẽ tự xử lý 70% Anchor Text / 30% Link trần).
+- "tags": Chuỗi 6-10 từ khóa tiếng Việt ngăn cách bởi dấu phẩy.
+
+Trả về đúng JSON với 4 khóa: "short_location_name", "title", "description", "tags"."""
+        return call_gemini_json(prompt, key_offset=2)
+
     raise ValueError(f"Unknown channel: {channel}")
 
 
@@ -997,18 +1037,258 @@ def upload_to_dailymotion(mp4_path: Path, title: str, description: str, tags: st
     return f"https://www.dailymotion.com/video/{vid_id}"
 
 
-def update_status_json(article_url: str, channel: str, info: dict):
+def upload_to_archive_org(mp4_path: Path, title: str, html_desc: str, tags: str, article_url: str, short_loc: str, slug: str) -> str:
+    """Upload HD MP4 video + 500-650 word HTML SEO description (70% Anchor / 30% Bare Link) to Internet Archive (archive.org)."""
+    if not ARCHIVE_ACCESS_KEY or not ARCHIVE_SECRET_KEY:
+        raise RuntimeError("Missing ARCHIVE_ACCESS_KEY / ARCHIVE_SECRET_KEY")
+
+    final_html = enforce_spotify_html_link(html_desc, article_url, short_loc)
+    url_hash = hashlib.md5(article_url.encode("utf-8")).hexdigest()[:6]
+    item_id = f"dulichcheckin-{slug[:42]}-{url_hash}"
+    clean_file = f"{slug[:48]}.mp4"
+
+    def ia_uri(val: str) -> str:
+        return "uri(" + urllib.parse.quote((val or "").strip(), safe="") + ")"
+
+    subject_list = [s.strip() for s in re.split(r"[,;]", tags or "") if s.strip()]
+    if "Du Lịch Checkin" not in subject_list:
+        subject_list.insert(0, "Du Lịch Checkin")
+    if short_loc and short_loc not in subject_list:
+        subject_list.insert(1, short_loc)
+    subjects_str = "; ".join(subject_list[:10])
+
+    headers = {
+        "Authorization": f"LOW {ARCHIVE_ACCESS_KEY}:{ARCHIVE_SECRET_KEY}",
+        "x-amz-auto-make-bucket": "1",
+        "x-archive-meta01-collection": "opensource_movies",
+        "x-archive-meta-mediatype": "movies",
+        "x-archive-meta-title": ia_uri(title[:200]),
+        "x-archive-meta-description": ia_uri(final_html),
+        "x-archive-meta-creator": ia_uri("Du Lịch Checkin (dulichcheckin.com)"),
+        "x-archive-meta-subject": ia_uri(subjects_str),
+        "x-archive-meta-language": "vie",
+        "x-archive-meta-external-identifier": article_url,
+        "Content-Type": "video/mp4",
+    }
+
+    s3_url = f"https://s3.us.archive.org/{item_id}/{clean_file}"
+    with open(mp4_path, "rb") as f:
+        r = requests.put(s3_url, headers=headers, data=f, timeout=240)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Archive.org S3 PUT failed HTTP {r.status_code}: {r.text[:300]}")
+    return f"https://archive.org/details/{item_id}"
+
+
+def upload_to_bluesky(mp4_path: Path, title: str, post_text: str, article_url: str, short_loc: str, image_urls: list[str]) -> str:
+    """Publish native HD video (or HD visual card fallback) to Bluesky with 70% Anchor Text / 30% Bare Link facet."""
+    if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
+        raise RuntimeError("Missing BLUESKY_HANDLE / BLUESKY_PASSWORD")
+
+    sess_res = requests.post(
+        "https://bsky.social/xrpc/com.atproto.server.createSession",
+        json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_PASSWORD},
+        timeout=25,
+    )
+    sess_res.raise_for_status()
+    sess = sess_res.json()
+    jwt = sess["accessJwt"]
+    did = sess["did"]
+    handle = sess.get("handle") or BLUESKY_HANDLE
+    pds = (sess.get("didDoc", {}).get("service") or [{}])[0].get("serviceEndpoint", "https://bsky.social").rstrip("/")
+    pds_host = pds.replace("https://", "").replace("http://", "").strip("/")
+    auth_hdr = {"Authorization": f"Bearer {jwt}"}
+
+    # 1. Build text + UTF-8 byte-accurate link facet (70% Anchor Text / 30% Bare Link)
+    clean_body = re.sub(r"\s+", " ", (post_text or "")).replace(article_url, "").strip()
+    use_anchor = (random.random() < 0.70)
+
+    if use_anchor and short_loc:
+        if len(clean_body) > 210:
+            clean_body = clean_body[:208].rsplit(" ", 1)[0].rstrip(".,;:") + "."
+        m = re.search(re.escape(short_loc), clean_body, re.I)
+        if m:
+            full_text = clean_body
+            b_start = len(full_text[:m.start()].encode("utf-8"))
+            b_end = len(full_text[:m.end()].encode("utf-8"))
+        else:
+            lead = f" Xem chi tiết kinh nghiệm khám phá {short_loc}."
+            full_text = (clean_body.rstrip(".") + "." + lead).strip()
+            m2 = re.search(re.escape(short_loc), full_text, re.I)
+            b_start = len(full_text[:m2.start()].encode("utf-8"))
+            b_end = len(full_text[:m2.end()].encode("utf-8"))
+    else:
+        max_body = max(60, 275 - len(article_url))
+        if len(clean_body) > max_body:
+            clean_body = clean_body[:max_body].rsplit(" ", 1)[0].rstrip(".,;:") + "."
+        full_text = f"{clean_body}\nXem chi tiết: {article_url}"
+        idx_u = full_text.find(article_url)
+        b_start = len(full_text[:idx_u].encode("utf-8"))
+        b_end = b_start + len(article_url.encode("utf-8"))
+
+    facets = [
+        {
+            "index": {"byteStart": b_start, "byteEnd": b_end},
+            "features": [{"$type": "app.bsky.richtext.facet#link", "uri": article_url}],
+        }
+    ]
+
+    # 2. Try uploading native MP4 video via Bluesky video service
+    embed_obj = None
+    try:
+        exp_ts = int(time.time()) + 1500
+        sa_res = requests.get(
+            f"{pds}/xrpc/com.atproto.server.getServiceAuth",
+            params={"aud": f"did:web:{pds_host}", "lxm": "com.atproto.repo.uploadBlob", "exp": str(exp_ts)},
+            headers=auth_hdr,
+            timeout=20,
+        )
+        if sa_res.status_code == 200:
+            sa_token = sa_res.json()["token"]
+            vid_bytes = mp4_path.read_bytes()
+            up_v = requests.post(
+                "https://video.bsky.app/xrpc/app.bsky.video.uploadVideo",
+                params={"did": did, "name": f"dulichcheckin_{int(time.time())}.mp4"},
+                headers={"Authorization": f"Bearer {sa_token}", "Content-Type": "video/mp4"},
+                data=vid_bytes,
+                timeout=120,
+            )
+            if up_v.status_code in (200, 409):
+                job = up_v.json().get("jobStatus") or up_v.json()
+                job_id = job.get("jobId")
+                video_blob = job.get("blob")
+                for _ in range(25):
+                    if video_blob:
+                        break
+                    if not job_id or job.get("state") == "JOB_STATE_FAILED":
+                        break
+                    time.sleep(3)
+                    st_r = requests.get(
+                        "https://video.bsky.app/xrpc/app.bsky.video.getJobStatus",
+                        params={"jobId": job_id},
+                        timeout=15,
+                    )
+                    if st_r.status_code == 200:
+                        job = st_r.json().get("jobStatus") or st_r.json()
+                        video_blob = job.get("blob")
+                if video_blob:
+                    embed_obj = {
+                        "$type": "app.bsky.embed.video",
+                        "video": video_blob,
+                        "alt": title[:200],
+                        "aspectRatio": {"width": 1280, "height": 720},
+                    }
+                    print("Bluesky native HD video transcoded & attached!")
+    except Exception as ve:
+        print(f"Bluesky native video note (using external visual card fallback): {ve}")
+
+    # 3. Fallback to rich website card with HD frame thumbnail if video transcoding wasn't available
+    if not embed_obj:
+        ext_card = {
+            "uri": article_url,
+            "title": title[:200],
+            "description": clean_body[:250],
+        }
+        slide_p = WORK_DIR / "slide_0.jpg"
+        if slide_p.exists():
+            try:
+                tb_res = requests.post(
+                    f"{pds}/xrpc/com.atproto.repo.uploadBlob",
+                    headers={"Authorization": f"Bearer {jwt}", "Content-Type": "image/jpeg"},
+                    data=slide_p.read_bytes(),
+                    timeout=30,
+                )
+                if tb_res.status_code == 200:
+                    ext_card["thumb"] = tb_res.json()["blob"]
+            except Exception:
+                pass
+        embed_obj = {"$type": "app.bsky.embed.external", "external": ext_card}
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    record = {
+        "$type": "app.bsky.feed.post",
+        "text": full_text,
+        "facets": facets,
+        "embed": embed_obj,
+        "langs": ["vi"],
+        "createdAt": now_iso,
+    }
+    post_res = requests.post(
+        f"{pds}/xrpc/com.atproto.repo.createRecord",
+        headers={"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"},
+        json={"repo": did, "collection": "app.bsky.feed.post", "record": record},
+        timeout=30,
+    )
+    if post_res.status_code >= 400:
+        raise RuntimeError(f"Bluesky createRecord failed HTTP {post_res.status_code}: {post_res.text[:300]}")
+    rkey = post_res.json()["uri"].split("/")[-1]
+    return f"https://bsky.app/profile/{handle}/post/{rkey}"
+
+
+def read_status_json() -> dict:
     st_file = ROOT_DIR / "status.json"
-    data = {}
     if st_file.exists():
         try:
-            data = json.loads(st_file.read_text(encoding="utf-8"))
+            return json.loads(st_file.read_text(encoding="utf-8"))
         except Exception:
-            data = {}
+            return {}
+    return {}
+
+
+def update_status_json(article_url: str, channel: str, info: dict):
+    st_file = ROOT_DIR / "status.json"
+    data = read_status_json()
     if article_url not in data:
         data[article_url] = {}
     data[article_url][channel] = info
     st_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_or_build_hd_video(article: dict, slug: str, now_str: str) -> tuple[Path, str, float, str, dict]:
+    """Reuse existing HD MP4 from GitHub Release if already built for this article, or render once and cache."""
+    article_url = article["url"]
+    st = read_status_json().get(article_url) or {}
+
+    # Check if video_cache or dailymotion already has a valid GitHub Release MP4 URL
+    cached_url = (st.get("video_cache") or {}).get("mp4_url") or (st.get("dailymotion") or {}).get("mp4_url")
+    cached_dur = (st.get("video_cache") or {}).get("duration_sec") or (st.get("dailymotion") or {}).get("duration_sec") or 95.0
+    cached_loc = (st.get("video_cache") or {}).get("short_loc") or re.split(r"[:|–—?-]", article["h1"])[0].strip()
+
+    mp4_path = WORK_DIR / f"{slug}-hd-video.mp4"
+    if cached_url and mp4_path.exists() and mp4_path.stat().st_size > 100000:
+        return mp4_path, cached_url, float(cached_dur), cached_loc, {}
+
+    if cached_url:
+        try:
+            print(f"Reusing cached HD MP4 from GitHub Release: {cached_url}")
+            r = requests.get(cached_url, timeout=60)
+            if r.status_code == 200 and len(r.content) > 100000:
+                mp4_path.write_bytes(r.content)
+                return mp4_path, cached_url, float(cached_dur), cached_loc, {}
+        except Exception as e:
+            print(f"Cache download note, rebuilding HD MP4: {e}")
+
+    # Render new HD video using master broadcaster script
+    master_data = generate_channel_script("dailymotion", article)
+    speech = master_data["speech_script"].strip()
+    short_loc = (master_data.get("short_location_name") or re.split(r"[:|–—?-]", article["h1"])[0]).strip()
+    mp3_path = WORK_DIR / f"{slug}-video-voice.mp3"
+    style_dir = (
+        "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
+    )
+    duration = call_gemini_tts_to_mp3(speech, style_dir, mp3_path, key_offset=2)
+    print(f"Generated Video Voice MP3 (with Studio BGM): {mp3_path.name} ({duration:.1f}s)")
+    build_hd_video_from_images(article["images"], mp3_path, duration, mp4_path, master_data.get("scenes"), short_loc)
+    print(f"Built HD MP4: {mp4_path.name} ({mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
+    mp4_release_url, _ = upload_mp3_to_github_release(mp4_path)
+    print(f"Uploaded HD MP4 to GitHub Release cache: {mp4_release_url}")
+
+    update_status_json(article_url, "video_cache", {
+        "mp4_url": mp4_release_url,
+        "duration_sec": round(duration, 1),
+        "short_loc": short_loc,
+        "cached_at": now_str,
+    })
+    return mp4_path, mp4_release_url, duration, short_loc, master_data
 
 
 def main():
@@ -1026,25 +1306,26 @@ def main():
     slug = to_seo_slug(article["h1"])
     print(f"Article H1: {article['h1']} | Images found: {len(article['images'])}")
 
-    channels = ["spotify", "castbox", "dailymotion"] if channel_arg == "all" else [channel_arg]
+    channels = ["spotify", "castbox", "dailymotion", "youtube", "bluesky", "archive"] if channel_arg == "all" else [channel_arg]
     now_str = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7))).strftime("%d/%m/%Y %H:%M")
 
     for ch in channels:
         print(f"\n=== Processing channel: {ch.upper()} ===")
-        script_data = generate_channel_script(ch, article)
-        ep_title = script_data["title"].strip()
-        speech = script_data["speech_script"].strip()
-        desc = script_data["description"].strip()
-        short_loc = (script_data.get("short_location_name") or re.split(r"[:|–—?-]", article["h1"])[0]).strip()
-
-        mp3_path = WORK_DIR / f"{slug}-{ch}.mp3"
-        style_dir = (
-            "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
-        )
-        duration = call_gemini_tts_to_mp3(speech, style_dir, mp3_path, key_offset=channels.index(ch))
-        print(f"Generated MP3 (with Studio BGM): {mp3_path.name} ({duration:.1f}s)")
 
         if ch in ("spotify", "castbox"):
+            script_data = generate_channel_script(ch, article)
+            ep_title = script_data["title"].strip()
+            speech = script_data["speech_script"].strip()
+            desc = script_data["description"].strip()
+            short_loc = (script_data.get("short_location_name") or re.split(r"[:|–—?-]", article["h1"])[0]).strip()
+
+            mp3_path = WORK_DIR / f"{slug}-{ch}.mp3"
+            style_dir = (
+                "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
+            )
+            duration = call_gemini_tts_to_mp3(speech, style_dir, mp3_path, key_offset=channels.index(ch))
+            print(f"Generated MP3 (with Studio BGM): {mp3_path.name} ({duration:.1f}s)")
+
             mp3_url, mp3_size = upload_mp3_to_github_release(mp3_path)
             ep_cov_jpg = WORK_DIR / f"{slug}-{ch}-cover.jpg"
             ep_cov_url = build_episode_cover_1400(article["images"], short_loc, ep_cov_jpg)
@@ -1058,13 +1339,14 @@ def main():
                 "duration_sec": round(duration, 1),
                 "published_at": now_str,
             })
+
         elif ch == "dailymotion":
-            mp4_path = WORK_DIR / f"{slug}-dailymotion.mp4"
-            build_hd_video_from_images(article["images"], mp3_path, duration, mp4_path, script_data.get("scenes"), short_loc)
-            print(f"Built HD MP4: {mp4_path.name} ({mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
-            # Always upload HD MP4 to GitHub Releases so user can watch/download immediately!
-            mp4_release_url, _ = upload_mp3_to_github_release(mp4_path)
-            print(f"Saved HD MP4 to GitHub Release: {mp4_release_url}")
+            mp4_path, mp4_release_url, duration, short_loc, master_data = get_or_build_hd_video(article, slug, now_str)
+            script_data = master_data if master_data.get("title") else generate_channel_script("dailymotion", article)
+            ep_title = script_data["title"].strip()
+            desc = script_data["description"].strip()
+            short_loc = (script_data.get("short_location_name") or short_loc).strip()
+
             dm_url = ""
             dm_note = "ok"
             try:
@@ -1078,6 +1360,74 @@ def main():
                 "mp4_url": mp4_release_url,
                 "video_url": dm_url,
                 "dm_status": dm_note,
+                "duration_sec": round(duration, 1),
+                "published_at": now_str,
+            })
+
+        elif ch == "youtube":
+            mp4_path, mp4_release_url, duration, short_loc, _ = get_or_build_hd_video(article, slug, now_str)
+            yt_data = generate_channel_script("youtube", article)
+            yt_title = (yt_data.get("title") or article["h1"]).strip()[:98]
+            yt_short_loc = (yt_data.get("short_location_name") or short_loc).strip()
+            yt_raw_desc = (yt_data.get("description") or article["content"][:2200]).strip()
+            yt_full_desc = enforce_varied_bare_link_plain(yt_raw_desc, article_url, yt_short_loc, max_chars=4600)
+            yt_tags = (yt_data.get("tags") or f"du lịch checkin, {yt_short_loc}, du lịch việt nam").strip()
+            print(f"Prepared YouTube HD Video Package: '{yt_title}' | MP4: {mp4_release_url}")
+            existing_yt = (read_status_json().get(article_url) or {}).get("youtube") or {}
+            update_status_json(article_url, "youtube", {
+                "title": yt_title,
+                "description": yt_full_desc,
+                "tags": yt_tags,
+                "mp4_url": mp4_release_url,
+                "video_url": existing_yt.get("video_url", ""),
+                "duration_sec": round(duration, 1),
+                "ready_for_yt": True,
+                "published_at": now_str,
+            })
+
+        elif ch == "bluesky":
+            mp4_path, mp4_release_url, duration, short_loc, _ = get_or_build_hd_video(article, slug, now_str)
+            bs_data = generate_channel_script("bluesky", article)
+            bs_title = (bs_data.get("title") or article["h1"]).strip()
+            bs_short_loc = (bs_data.get("short_location_name") or short_loc).strip()
+            bs_text = (bs_data.get("description") or f"Khám phá thực tế {bs_short_loc} cùng Du Lịch Checkin.").strip()
+            bs_url = ""
+            bs_note = "ok"
+            try:
+                bs_url = upload_to_bluesky(mp4_path, bs_title, bs_text, article_url, bs_short_loc, article["images"])
+                print(f"Published Bluesky Video Post: {bs_url}")
+            except Exception as b_err:
+                bs_note = str(b_err)
+                print(f"Bluesky error: {bs_note}")
+            update_status_json(article_url, "bluesky", {
+                "title": bs_title,
+                "post_url": bs_url,
+                "mp4_url": mp4_release_url,
+                "status": bs_note,
+                "duration_sec": round(duration, 1),
+                "published_at": now_str,
+            })
+
+        elif ch == "archive":
+            mp4_path, mp4_release_url, duration, short_loc, _ = get_or_build_hd_video(article, slug, now_str)
+            ia_data = generate_channel_script("archive", article)
+            ia_title = (ia_data.get("title") or article["h1"]).strip()
+            ia_short_loc = (ia_data.get("short_location_name") or short_loc).strip()
+            ia_desc = (ia_data.get("description") or f"<p>{article['content'][:2200]}</p>").strip()
+            ia_tags = (ia_data.get("tags") or f"Du Lịch Checkin, {ia_short_loc}, Du lịch Việt Nam").strip()
+            ia_url = ""
+            ia_note = "ok"
+            try:
+                ia_url = upload_to_archive_org(mp4_path, ia_title, ia_desc, ia_tags, article_url, ia_short_loc, slug)
+                print(f"Published Archive.org Video & HTML SEO Article: {ia_url}")
+            except Exception as ia_err:
+                ia_note = str(ia_err)
+                print(f"Archive.org error: {ia_note}")
+            update_status_json(article_url, "archive", {
+                "title": ia_title,
+                "archive_url": ia_url,
+                "mp4_url": mp4_release_url,
+                "status": ia_note,
                 "duration_sec": round(duration, 1),
                 "published_at": now_str,
             })
