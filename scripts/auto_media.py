@@ -469,7 +469,8 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0", "-i", str(concat_txt),
             "-i", str(audio_mp3),
-            "-c:v", "copy",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+            "-r", "25",
             "-c:a", "aac", "-b:a", "128k",
             "-t", f"{duration_sec:.2f}",
             "-movflags", "+faststart",
@@ -513,7 +514,9 @@ def upload_to_dailymotion(mp4_path: Path, title: str, description: str, tags: st
     with open(mp4_path, "rb") as f:
         file_res = requests.post(upload_url, files={"file": (mp4_path.name, f, "video/mp4")}, timeout=180)
     file_res.raise_for_status()
-    uploaded_file_url = file_res.json()["url"]
+    file_meta = file_res.json()
+    print(f"Dailymotion upload response: {json.dumps(file_meta, ensure_ascii=False)}")
+    uploaded_file_url = file_meta["url"]
 
     # 4. Create & publish video under Partner API /rest/user/{ooi}/videos
     full_desc = f"{description.strip()}\n\nXem chi tiết lịch trình và kinh nghiệm tham quan tại: {article_url}"
