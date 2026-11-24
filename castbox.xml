@@ -4,7 +4,7 @@
      xmlns:atom="http://www.w3.org/2005/Atom"
      xmlns:content="http://purl.org/rss/1.0/modules/content/">
   <channel>
-    <title>Cẩm Nang Du Lịch Checkin</title>
+    <title>Cam Nang Du Lich Checkin</title>
     <link>https://dulichcheckin.com</link>
     <language>vi</language>
     <copyright>Du Lịch Checkin</copyright>
@@ -22,18 +22,5 @@
     <itunes:category text="Leisure">
       <itunes:category text="Travel"/>
     </itunes:category>
-    <item>
-      <title>Cẩm nang đi lễ Đền Bạch Mã: Giờ mở cửa, giá vé và lưu ý thực tế</title>
-      <link>https://dulichcheckin.com/den-bach-ma/</link>
-      <guid isPermaLink="false">castbox-https-dulichcheckin-com-den-bach-ma</guid>
-      <pubDate>Tue, 24 Nov 2026 03:04:50 +0000</pubDate>
-      <description><![CDATA[<p>Tập podcast thuộc chuyên mục Cẩm nang Du Lịch Checkin mang đến toàn bộ thông tin hướng dẫn đi lễ và tham quan chi tiết tại Đền Bạch Mã, Di tích Quốc gia đặc biệt giữ vai trò Trấn Đông của kinh thành Thăng Long xưa. Người nghe sẽ nắm rõ vị trí địa lý tại phố Hàng Buồm, thời gian mở cửa các ngày trong tuần, thời gian mở cửa buổi tối cuối tuần cũng như khung giá vé tham quan mới nhất.</p><p>Bên cạnh đó, nội dung tập podcast còn chia sẻ các điểm nhấn kiến trúc không thể bỏ qua như nhà Phương đình, mái vòm vỏ cua và Giếng Ngọc. Đặc biệt, chương trình cung cấp những lưu ý thực tế quan trọng về quy tắc sắm lễ chay, quy định thắp hương, cách di chuyển qua bậu cửa gỗ và tác phong trang phục lịch sự khi hành lễ tại chốn linh thiêng.</p><p>Xem bài viết hướng dẫn chi tiết tại: <a href="https://dulichcheckin.com/den-bach-ma/">https://dulichcheckin.com/den-bach-ma/</a></p>]]></description>
-      <enclosure url="https://github.com/dulichcheckin/media/releases/download/audio-files/den-bach-ma-su-tich-van-khan-kinh-nghiem-di-le-castbox.mp3" length="1334828" type="audio/mpeg"/>
-      <itunes:title>Cẩm nang đi lễ Đền Bạch Mã: Giờ mở cửa, giá vé và lưu ý thực tế</itunes:title>
-      <itunes:author>Du Lịch Checkin</itunes:author>
-      <itunes:summary>Tập podcast thuộc chuyên mục Cẩm nang Du Lịch Checkin mang đến toàn bộ thông tin hướng dẫn đi lễ và tham quan chi tiết tại Đền Bạch Mã, Di tích Quốc gia đặc biệt giữ vai trò Trấn Đông của kinh thành Thăng Long xưa. Người nghe sẽ nắm rõ vị trí địa lý tại phố Hàng Buồm, thời gian mở cửa các ngày trong tuần, thời gian mở cửa buổi tối cuối tuần cũng nh Xem chi tiết tại: https://dulichcheckin.com/den-bach-ma/</itunes:summary>
-      <itunes:duration>00:01:23</itunes:duration>
-      <itunes:explicit>false</itunes:explicit>
-    </item>
   </channel>
 </rss>
