@@ -118,72 +118,34 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
         fname_slug = Path(urllib.parse.urlparse(clean_u).path).stem.replace("-", " ")
         desc_label = alt_txt or figcap or fname_slug
         imgs.append(clean_u)
-        image_items.append({"url": clean_u, "desc": desc_label})
+        image_items.append({"url": clean_u, "desc": f"[Ảnh gốc bài web] {desc_label}", "source": "web"})
 
-    # Search 5-8 external images from Wikipedia VI + Wikimedia Commons + Flickr Public Feed
+    # 2. Multi-query Vietnamese Image Search (Bing Images) + Gemini Multimodal Vision Verification
     loc_short = re.split(r"[:|–—?-]", h1_title)[0].strip()
     if len(loc_short) >= 4:
-        loc_slug_words = [w for w in to_seo_slug(loc_short).split("-") if len(w) > 2]
-        # 1. Wikipedia VI
-        try:
-            vi_url = (
-                "https://vi.wikipedia.org/w/api.php?action=query&generator=search"
-                f"&gsrsearch={urllib.parse.quote(loc_short)}&gsrlimit=5&prop=pageimages&pithumbsize=1280&format=json"
-            )
-            vr = requests.get(vi_url, headers=headers, timeout=10)
-            if vr.status_code == 200:
-                for p in vr.json().get("query", {}).get("pages", {}).values():
-                    iu = (p.get("thumbnail") or {}).get("source", "")
-                    if re.search(r"\.(?:jpg|jpeg|png)$", iu, re.I) and not re.search(r"map|icon|logo|flag", iu, re.I):
-                        if iu not in imgs:
-                            imgs.append(iu)
-                            image_items.append({"url": iu, "desc": f"Ảnh tư liệu {p.get('title', loc_short)}"})
-        except Exception:
-            pass
+        vision_ext_items = scrape_bing_vietnamese_images_with_gemini_vision(loc_short, h1_title, headings, imgs)
+        for vit in vision_ext_items:
+            if vit["url"] not in imgs:
+                imgs.append(vit["url"])
+                image_items.append(vit)
 
-        # 2. Wikimedia Commons
-        try:
-            w_url = (
-                "https://commons.wikimedia.org/w/api.php?action=query&generator=search"
-                f"&gsrsearch=filetype:bitmap|{urllib.parse.quote(loc_short)}&gsrlimit=10"
-                "&prop=imageinfo&iiprop=url&format=json"
-            )
-            wr = requests.get(w_url, headers=headers, timeout=12)
-            if wr.status_code == 200:
-                pages = wr.json().get("query", {}).get("pages", {})
-                ext_added = 0
-                for p in pages.values():
-                    t_slug = to_seo_slug(p.get("title", ""))
-                    if loc_slug_words and not any(w in t_slug for w in loc_slug_words[:2]):
-                        continue
-                    ii = (p.get("imageinfo") or [{}])[0]
-                    iu = ii.get("url", "")
-                    if re.search(r"\.(?:jpg|jpeg|png)$", iu, re.I) and not re.search(r"map|icon|logo|flag|stamp", iu, re.I):
-                        if iu not in imgs:
-                            imgs.append(iu)
-                            clean_ft = p.get("title", "").replace("File:", "").rsplit(".", 1)[0]
-                            image_items.append({"url": iu, "desc": f"Góc nhìn thực tế {loc_short} ({clean_ft})"})
-                            ext_added += 1
-                            if ext_added >= 5:
-                                break
-        except Exception:
-            pass
-
-        # 3. Flickr Public Photos Feed
-        try:
-            f_tags = ",".join(loc_slug_words[:3])
-            f_url = f"https://api.flickr.com/services/feeds/photos_public.gne?tags={urllib.parse.quote(f_tags)},vietnam&tagmode=all&format=json&nojsoncallback=1"
-            fr = requests.get(f_url, headers=headers, timeout=10)
-            if fr.status_code == 200:
-                for it in (fr.json().get("items") or [])[:4]:
-                    mu = (it.get("media") or {}).get("m", "")
-                    if mu:
-                        hi_u = re.sub(r"_m\.jpg$", "_b.jpg", mu, flags=re.I)
-                        if hi_u not in imgs:
-                            imgs.append(hi_u)
-                            image_items.append({"url": hi_u, "desc": f"Khung cảnh thực tế {loc_short} ({it.get('title', '')})"})
-        except Exception:
-            pass
+        # Fallback supplemental Wikipedia VI if Bing returned fewer than 6 images
+        if len(vision_ext_items) < 6:
+            try:
+                vi_url = (
+                    "https://vi.wikipedia.org/w/api.php?action=query&generator=search"
+                    f"&gsrsearch={urllib.parse.quote(loc_short)}&gsrlimit=5&prop=pageimages&pithumbsize=1280&format=json"
+                )
+                vr = requests.get(vi_url, headers=headers, timeout=10)
+                if vr.status_code == 200:
+                    for p in vr.json().get("query", {}).get("pages", {}).values():
+                        iu = (p.get("thumbnail") or {}).get("source", "")
+                        if re.search(r"\.(?:jpg|jpeg|png)$", iu, re.I) and not re.search(r"map|icon|logo|flag", iu, re.I):
+                            if iu not in imgs:
+                                imgs.append(iu)
+                                image_items.append({"url": iu, "desc": f"Ảnh tư liệu {p.get('title', loc_short)}", "source": "wiki"})
+            except Exception:
+                pass
 
     body = re.sub(r"<(script|style|nav|footer|aside)[\s\S]*?</\1>", " ", page_html, flags=re.I)
     body = re.sub(r"<[^>]+>", " ", body)
@@ -195,9 +157,135 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
         "h1": h1_title,
         "outline": " | ".join(headings[:18]),
         "content": body[:13500],
-        "images": imgs[:22],
-        "image_items": image_items[:22],
+        "images": imgs[:36],
+        "image_items": image_items[:36],
     }
+
+
+def scrape_bing_vietnamese_images_with_gemini_vision(loc_short: str, h1_title: str, headings: list[str], existing_urls: list[str]) -> list[dict]:
+    """Search Bing Images with 4 Vietnamese queries for the destination, then have Gemini Vision inspect thumbnails to filter & describe each photo."""
+    import io
+    from PIL import Image, ImageOps
+
+    b_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
+    }
+    queries = [
+        loc_short,
+        f"kiến trúc không gian {loc_short}",
+        f"toàn cảnh cổng {loc_short}",
+        f"tham quan du lịch {loc_short}",
+    ]
+    for h in headings[:5]:
+        if len(h) < 42 and any(k in h.lower() for k in ("kiến trúc", "không gian", "giếng", "động", "điện", "chùa", "đền", "cổng", "tượng", "cảnh")):
+            queries.append(f"{h} {loc_short}")
+            if len(queries) >= 5:
+                break
+
+    raw_candidates = []
+    seen_u = set(existing_urls)
+    bad_patterns = re.compile(r"logo|icon|avatar|banner|shopee|lazada|tiki|tiktok|sendo|map|bando|chart|\.svg|\.gif", re.I)
+
+    for q in queries[:5]:
+        try:
+            b_url = f"https://www.bing.com/images/search?q={urllib.parse.quote(q)}&form=HDRSC2&first=1"
+            r = requests.get(b_url, headers=b_headers, timeout=10)
+            if r.status_code != 200:
+                continue
+            matches = re.findall(r"murl&quot;:&quot;(https?://[^&]+?\.(?:jpg|jpeg|png|webp))&quot;", r.text, flags=re.I)
+            added_this_q = 0
+            for mu in matches:
+                u = html.unescape(mu).strip()
+                if u in seen_u or bad_patterns.search(u):
+                    continue
+                seen_u.add(u)
+                raw_candidates.append((u, q))
+                added_this_q += 1
+                if added_this_q >= 7 or len(raw_candidates) >= 26:
+                    break
+        except Exception as e:
+            print(f"Bing query '{q}' note: {e}")
+
+    # Download candidate images and prepare compact 320x200 thumbnails for Gemini Multimodal Vision
+    valid_candidates = []
+    for u, q in raw_candidates:
+        if len(valid_candidates) >= 18:
+            break
+        try:
+            ir = requests.get(u, headers=b_headers, timeout=7)
+            if ir.status_code == 200 and len(ir.content) > 8000:
+                im = Image.open(io.BytesIO(ir.content)).convert("RGB")
+                w, h = im.size
+                if w < 420 or h < 260 or (w / float(h)) > 2.8 or (h / float(w)) > 2.2:
+                    continue
+                thumb = ImageOps.contain(im, (320, 200), method=Image.Resampling.BILINEAR)
+                buf = io.BytesIO()
+                thumb.save(buf, format="JPEG", quality=72)
+                b64_thumb = base64.b64encode(buf.getvalue()).decode("ascii")
+                valid_candidates.append({"url": u, "query": q, "b64": b64_thumb})
+        except Exception:
+            continue
+
+    if not valid_candidates:
+        return []
+
+    print(f"Downloaded {len(valid_candidates)} external candidate photos from Bing Images. Running Gemini Vision inspection...")
+    parts = [
+        {
+            "text": (
+                f"Bạn là Đạo diễn Hình ảnh cho video du lịch về chủ đề: '{h1_title}' (Địa điểm cốt lõi: '{loc_short}').\n"
+                f"Dưới đây là {len(valid_candidates)} bức ảnh thực tế đánh số từ 0 đến {len(valid_candidates)-1}.\n"
+                "Hãy NHÌN TRỰC TIẾP vào từng bức ảnh để kiểm duyệt và mô tả:\n"
+                "1. CHỈ GIỮ LẠI những bức ảnh chụp cảnh quan, kiến trúc, cổng đền/chùa, ban thờ, tượng thờ, hang động, giếng cổ, thiên nhiên, lễ hội hoặc không gian thực tế phù hợp với địa điểm này.\n"
+                "2. LOẠI BỎ NGAY những ảnh bị lỗi, ảnh có chữ quảng cáo/bảng giá đè to giữa hình, ảnh bản đồ, ảnh chụp màn hình văn bản, ảnh chân dung tự sướng cận mặt, hoặc ảnh nhìn rõ là của địa danh khác không liên quan.\n"
+                "3. Với mỗi bức ảnh ĐẠT CHUẨN, hãy viết 'visual_desc' (8-15 từ tiếng Việt có dấu) mô tả thật cụ thể những gì mắt bạn nhìn thấy trong bức ảnh đó (VD: 'Cổng tam quan cổ kính dưới tán cây cổ thụ nhìn ra biển', 'Bậc đá rêu phong dẫn lên khu vực hang động và Giếng Tiên', 'Không gian ban thờ chính điện trang nghiêm rực rỡ sắc vàng').\n\n"
+                "Trả về đúng JSON theo cấu trúc: {\"approved\": [{\"index\": số_nguyên, \"visual_desc\": \"Mô tả chi tiết những gì thấy trong ảnh\"}]}"
+            )
+        }
+    ]
+    for idx, cand in enumerate(valid_candidates):
+        parts.append({"text": f"--- ẢNH ỨNG VIÊN #{idx} ---"})
+        parts.append({"inlineData": {"mimeType": "image/jpeg", "data": cand["b64"]}})
+
+    models = ["gemini-2.5-flash", "gemini-3.8-flash"]
+    for m_idx, model in enumerate(models):
+        for k_try in range(min(3, len(GEMINI_KEYS))):
+            key = GEMINI_KEYS[(m_idx + k_try) % len(GEMINI_KEYS)]
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}"
+            payload = {
+                "contents": [{"parts": parts}],
+                "generationConfig": {"temperature": 0.25, "responseMimeType": "application/json"},
+            }
+            try:
+                vr = requests.post(url, json=payload, timeout=90)
+                if vr.status_code == 200:
+                    txt = vr.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    parsed = json.loads(txt)
+                    approved_list = parsed.get("approved") if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+                    verified = []
+                    for ap in (approved_list or []):
+                        if not isinstance(ap, dict):
+                            continue
+                        c_idx = ap.get("index")
+                        v_desc = str(ap.get("visual_desc") or "").strip()
+                        if isinstance(c_idx, int) and 0 <= c_idx < len(valid_candidates) and v_desc:
+                            verified.append({
+                                "url": valid_candidates[c_idx]["url"],
+                                "desc": f"[Ảnh thật đã qua AI Vision kiểm duyệt] {v_desc}",
+                                "source": "bing_vision",
+                            })
+                    if verified:
+                        print(f"Gemini Vision approved {len(verified)}/{len(valid_candidates)} external photos with visual descriptions!")
+                        return verified
+            except Exception as e:
+                print(f"Gemini Vision note ({model}): {e}")
+
+    # Fallback if vision call hit quota: return top 10 valid candidates
+    return [
+        {"url": c["url"], "desc": f"[Ảnh thực tế tìm kiếm] Khung cảnh {loc_short}", "source": "bing_fallback"}
+        for c in valid_candidates[:10]
+    ]
 
 
 def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
@@ -570,32 +658,34 @@ Trả về đúng JSON với 5 khóa:
     if channel == "youtube":
         img_items = article.get("image_items") or []
         img_catalog = "\n".join(
-            f"- Ảnh #{idx} [{'ẢNH GỐC BÀI WEB - CHUẨN 100%' if 'dulichcheckin.com' in str(it.get('url', '')) else 'ẢNH NGOÀI - CHỈ CHỌN NẾU ĐÚNG ĐỊA ĐIỂM/TỈNH THÀNH'}]: {it.get('desc') or 'Hình ảnh thực tế'}"
+            f"- Ảnh #{idx}: {it.get('desc') or 'Hình ảnh thực tế'}"
             for idx, it in enumerate(img_items)
         )
         prompt = f"""{base}
 
-DANH SÁCH ẢNH CỦA ĐỊA ĐIỂM (ƯU TIÊN SỐ 1 ẢNH GỐC BÀI WEB, KIỂM DUYỆT NGHIÊM NGẶT ẢNH NGOÀI):
+KHO ẢNH THẬT ĐÃ QUA AI VISION NHÌN & MÔ TẢ CHI TIẾT (GỒM ẢNH GỐC BÀI WEB + ẢNH TÌM KIẾM ĐÃ DUYỆT):
 {img_catalog}
 
-NHIỆM VỤ RIÊNG CHO VIDEO CHUYÊN SÂU [YOUTUBE HD 4.5 - 5 PHÚT (KỊCH BẢN RIÊNG 2 CHƯƠNG & KIỂM DUYỆT ẢNH)]:
-1. KỊCH BẢN THUYẾT MINH CHUYÊN SÂU DÀI KHOẢNG 620 - 740 TỪ (~4.5 - 5 PHÚT), KHÁC HOÀN TOÀN KỊCH BẢN DAILYMOTION:
-   - Chia thành 18 đến 22 phân cảnh nối tiếp nhau ("scenes").
-   - Nửa đầu (Cảnh 1 đến Cảnh 10): Mở đầu cuốn hút, giới thiệu vị trí, nguồn gốc lịch sử, sự tích, truyền thuyết và đi sâu phân tích kiến trúc, không gian cảnh quan đặc sắc nhất từ bài gốc.
-   - Nửa sau (Cảnh 11 đến hết): Cẩm nang trải nghiệm thực tế toàn diện từ bài gốc (giờ mở cửa, giá vé, thời điểm đẹp nhất, hướng dẫn di chuyển, kinh nghiệm đi lễ/tham quan, ẩm thực đặc sản và những lưu ý quan trọng).
-   - Mỗi phân cảnh có lời bình ("narration") dài khoảng 30-36 từ, viết theo lối Biên tập viên truyền hình ngọt ngào, truyền cảm, chủ động dùng dấu phẩy (,) và gạch ngang (—) để ngắt nhịp.
-2. QUY TẮC KIỂM DUYỆT & CHỌN ẢNH CHO TỪNG CẢNH:
-   - Với các tấm [ẢNH NGOÀI]: Hãy đọc kỹ mô tả của nó. Nếu tấm ảnh ngoài nào bị lệch sang địa điểm khác hoặc tỉnh thành khác thì TUYỆT ĐỐI LOẠI BỎ, KHÔNG CHỌN chỉ số của ảnh đó!
-   - Hãy khai thác tối đa toàn bộ các tấm [ẢNH GỐC BÀI WEB - CHUẨN 100%]. Ở nửa sau video (từ Cảnh 11 trở đi), bạn ĐƯỢC PHÉP chọn lại các tấm [ẢNH GỐC BÀI WEB] phù hợp với nội dung (hệ thống sẽ tự động chuyển sang góc máy Cận Cảnh Close-up cho lần xuất hiện thứ 2 để hình ảnh luôn mới mẻ và đúng chuẩn 100% địa điểm thật!).
+NHIỆM VỤ RIÊNG CHO PHÓNG SỰ VIDEO [YOUTUBE HD 4.5 - 5 PHÚT (34 - 38 PHÂN CẢNH ĐỔI ẢNH LIÊN TỤC MỖI 7 GIÂY)]:
+1. KỊCH BẢN THUYẾT MINH CHUYÊN SÂU DÀI KHOẢNG 660 - 760 TỪ (~4.5 - 5 PHÚT), CHIA THÀNH 34 ĐẾN 38 PHÂN CẢNH ("scenes"):
+   - Để người xem không bị nhàm chán, cứ mỗi 18 - 22 từ lời bình (~7 giây) là PHẢI chuyển sang 1 phân cảnh mới với 1 bức ảnh mới khớp 100% với câu đang nói!
+   - Chương 1 (Cảnh 1 đến Cảnh 18): Mở đầu ấn tượng, vị trí địa lý, chiều sâu lịch sử, sự tích / truyền thuyết thần thoại và đi sâu khám phá từng nét kiến trúc, cổng đền, chính điện, hang động, giếng cổ, cảnh quan đặc sắc từ bài gốc.
+   - Chương 2 (Cảnh 19 đến Cảnh 36+): Cẩm nang thực tế chi tiết từ bài gốc (thời điểm đi lễ/tham quan, giờ mở cửa, giá vé, hướng dẫn di chuyển, cách sắm lễ vật chay/mặn, lưu ý đọc văn khấn, trang phục ứng xử, ẩm thực đặc sản và kinh nghiệm thực tế).
+   - Viết theo lối Biên tập viên truyền hình ngọt ngào, truyền cảm, chủ động dùng dấu phẩy (,) và gạch ngang (—) để ngắt nhịp.
+2. QUY TẮC CHỌN NGUỒN ẢNH CHO TỪNG PHÂN CẢNH (KẾT HỢP ẢNH CHỤP THẬT & ẢNH AI VẼ MINH HỌA):
+   - Với các cảnh nói về KIẾN TRÚC, CỔNG ĐỀN, BAN THỜ, TƯỢNG THỜ, HANG ĐỘNG, GIẾNG TIÊN, CẢNH QUAN THỰC TẾ của địa điểm:
+     + Đặt `"type": "photo"` và chọn `"image_index"` (từ 0 đến {max(0, len(img_items)-1)}) có mô tả trong kho ảnh khớp nhất với câu thuyết minh đó. Hãy sử dụng hết toàn bộ kho ảnh thật ở trên!
+   - Với khoảng 10 đến 14 phân cảnh nói về các nội dung KHÔNG CẦN ẢNH CHỤP ĐỊA ĐIỂM THẬT (như: **Sự tích / Truyền thuyết / Lịch sử cổ xưa**, **Hướng dẫn sắm lễ / Mâm lễ vật dâng hương**, **Nghi thức đọc văn khấn**, **Chuẩn bị trang phục lịch sự / Hành trang khởi hành / Phương tiện di chuyển / Ẩm thực đặc sản**):
+     + Đặt `"type": "ai_gen"`, `"image_index": -1`, và viết `"ai_prompt_en"` (câu lệnh tiếng Anh dài 20-35 từ mô tả khung cảnh điện ảnh chân thực 16:9 chuẩn văn hóa Việt Nam để AI vẽ bức ảnh minh họa tuyệt đẹp cho đúng câu nói đó, tuyệt đối không có chữ trong ảnh).
 3. "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
-4. "title": Tiêu đề video YouTube hấp dẫn, chuẩn SEO, có dấu tiếng Việt (50-85 ký tự, cấu trúc khác hoàn toàn tiêu đề bài gốc và Dailymotion).
+4. "title": Tiêu đề video YouTube hấp dẫn, chuẩn SEO, có dấu tiếng Việt (50-85 ký tự).
 5. "description": Bài cẩm nang mô tả video YouTube chuyên sâu dài khoảng 480-620 từ (chia 4-5 đoạn văn rõ ràng bằng \\n\\n, văn bản thuần KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL).
 6. "tags": Chuỗi 8-12 từ khóa tiếng Việt chuẩn SEO YouTube ngăn cách bởi dấu phẩy.
 
 Trả về đúng JSON với 5 khóa:
 - "short_location_name": chuỗi
 - "title": chuỗi
-- "scenes": mảng 18-22 object [{{"image_index": số_nguyên, "caption": "Dòng tiêu đề phụ đề 5-10 từ hiện trên màn hình", "narration": "Đoạn lời bình 30-36 từ của biên tập viên"}}]
+- "scenes": mảng 34-38 object [{{"type": "photo" hoặc "ai_gen", "image_index": số_nguyên, "ai_prompt_en": "Chuỗi tiếng Anh mô tả ảnh nếu type là ai_gen (hoặc rỗng nếu type là photo)", "caption": "Dòng tiêu đề phụ đề 5-10 từ hiện trên màn hình", "narration": "Đoạn lời bình 18-22 từ (~7 giây) của biên tập viên"}}]
 - "description": chuỗi
 - "tags": chuỗi"""
         res = call_gemini_json(prompt, key_offset=3)
@@ -993,8 +1083,51 @@ def build_youtube_thumbnail_1280x720(image_urls: list[str], yt_title: str, short
     return t_url
 
 
+def generate_ai_illustration_raw_image(ai_prompt_en: str, scene_idx: int):
+    """Generate a 1280x720 HD 16:9 illustration for legends, offerings, prayers, or travel tips."""
+    import io
+    from PIL import Image
+
+    clean_prompt = (
+        f"Photorealistic cinematic 16:9 Vietnamese cultural & travel photography, {ai_prompt_en.strip()}, "
+        "warm natural lighting, ultra detailed, 8k resolution, no text, no watermark, no letters"
+    )
+
+    # 1. Try Gemini 2.0 Flash Image Generation with rotating keys
+    if GEMINI_KEYS:
+        key = GEMINI_KEYS[scene_idx % len(GEMINI_KEYS)]
+        g_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key={urllib.parse.quote(key)}"
+        g_payload = {
+            "contents": [{"parts": [{"text": f"Generate a realistic 16:9 horizontal photo without any text: {clean_prompt}"}]}],
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+        }
+        try:
+            gr = requests.post(g_url, json=g_payload, timeout=25)
+            if gr.status_code == 200:
+                parts = gr.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                for pt in parts:
+                    inl = pt.get("inlineData")
+                    if inl and inl.get("data"):
+                        img_bytes = base64.b64decode(inl["data"])
+                        return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        except Exception:
+            pass
+
+    # 2. Try Pollinations Flux 1280x720 HD (100% free, no API key required)
+    seed = 2026 + scene_idx * 53
+    for model_param in ("&model=flux", ""):
+        p_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(clean_prompt[:380])}?width=1280&height=720&seed={seed}&nologo=true{model_param}"
+        try:
+            pr = requests.get(p_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=28)
+            if pr.status_code == 200 and len(pr.content) > 10000:
+                return Image.open(io.BytesIO(pr.content)).convert("RGB")
+        except Exception:
+            continue
+    return None
+
+
 def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_sec: float, out_mp4: Path, scenes: list | None = None, short_loc: str = "Du lịch Việt Nam", max_scenes: int = 16):
-    """Build a crisp 1280x720 HD video with 100% uncropped images, blurred backdrop, TV captions & smooth transitions."""
+    """Build a crisp 1280x720 HD video with 100% uncropped images, AI illustrations, blurred backdrop, TV captions & smooth transitions."""
     from PIL import Image
 
     headers = {
@@ -1002,54 +1135,69 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
         "Referer": "https://dulichcheckin.com/",
     }
 
-    # Build ordered list of (image_url, weight_words, caption_text, zoom_center) from Gemini's scene-by-scene plan
+    # Build ordered list of (source_url_or_ai, weight_words, caption_text, zoom_center, ai_prompt_en)
     ordered_specs = []
     if scenes and isinstance(scenes, list) and image_urls:
         used_indices = set()
         for sc in scenes:
             if not isinstance(sc, dict):
                 continue
+            sc_type = str(sc.get("type") or "photo").strip().lower()
+            ai_prompt = str(sc.get("ai_prompt_en") or "").strip()
+            words = max(5, len(str(sc.get("narration", "")).split()))
+            cap = str(sc.get("caption") or sc.get("narration") or short_loc).strip()
+
+            if sc_type == "ai_gen" and ai_prompt:
+                fallback_u = image_urls[len(ordered_specs) % len(image_urls)]
+                ordered_specs.append((fallback_u, words, cap, False, ai_prompt))
+                continue
+
             idx = sc.get("image_index", 0)
             is_second_view = False
             if not isinstance(idx, int) or idx < 0 or idx >= len(image_urls):
                 unused = [i for i in range(len(image_urls)) if i not in used_indices]
                 idx = unused[0] if unused else (len(ordered_specs) % len(image_urls))
             elif idx in used_indices:
-                # If authentic web photo is deliberately chosen a 2nd time in Chapter 2, render with center-focus zoom!
-                if "dulichcheckin.com" in image_urls[idx]:
-                    is_second_view = True
+                unused = [i for i in range(len(image_urls)) if i not in used_indices]
+                if unused:
+                    idx = unused[0]
                 else:
-                    unused = [i for i in range(len(image_urls)) if i not in used_indices]
-                    idx = unused[0] if unused else (len(ordered_specs) % len(image_urls))
+                    is_second_view = True
             used_indices.add(idx)
-            words = max(5, len(str(sc.get("narration", "")).split()))
-            cap = str(sc.get("caption") or sc.get("narration") or short_loc).strip()
-            ordered_specs.append((image_urls[idx], words, cap, is_second_view))
+            ordered_specs.append((image_urls[idx], words, cap, is_second_view, ""))
 
     if not ordered_specs:
         for u in image_urls[:15]:
-            ordered_specs.append((u, 18, short_loc, False))
+            ordered_specs.append((u, 18, short_loc, False, ""))
 
     dl_imgs = []
     weights = []
     total_spec_count = min(max_scenes, len(ordered_specs))
-    for idx, (u, w, cap, z_center) in enumerate(ordered_specs[:max_scenes]):
+    for idx, (u, w, cap, z_center, ai_prompt) in enumerate(ordered_specs[:max_scenes]):
         try:
-            r = requests.get(u, headers=headers, timeout=20)
-            if r.status_code == 200 and len(r.content) > 5000:
-                raw_p = WORK_DIR / f"raw_{idx}"
-                raw_p.write_bytes(r.content)
-                raw_im = Image.open(raw_p).convert("RGB")
-                raw_p.unlink(missing_ok=True)
+            raw_im = None
+            src_label = u
+            if ai_prompt:
+                raw_im = generate_ai_illustration_raw_image(ai_prompt, idx)
+                if raw_im is not None:
+                    src_label = f"[AI_GENERATED] {ai_prompt[:45]}..."
+            if raw_im is None:
+                r = requests.get(u, headers=headers, timeout=20)
+                if r.status_code == 200 and len(r.content) > 5000:
+                    raw_p = WORK_DIR / f"raw_{idx}"
+                    raw_p.write_bytes(r.content)
+                    raw_im = Image.open(raw_p).convert("RGB")
+                    raw_p.unlink(missing_ok=True)
 
+            if raw_im is not None:
                 tv_frame = render_tv_frame_1280x720(raw_im, cap, short_loc, len(dl_imgs) + 1, total_spec_count, zoom_center=z_center)
                 p = WORK_DIR / f"slide_{idx}.jpg"
                 tv_frame.save(p, "JPEG", quality=93)
                 dl_imgs.append(p)
                 weights.append(w)
-                print(f"Scene #{len(dl_imgs)} ({w} words | zoom={z_center} | '{cap[:35]}') -> image: {u}")
+                print(f"Scene #{len(dl_imgs)} ({w} words | zoom={z_center} | '{cap[:35]}') -> {src_label}")
         except Exception as e:
-            print(f"Skip image {u}: {e}")
+            print(f"Skip scene #{idx} ({u}): {e}")
             continue
 
     if not dl_imgs:
@@ -1493,7 +1641,8 @@ def main():
                 "published_at": now_str,
             })
 
-        elif ch == "youtube":
+        elif ch in ("youtube", "preview"):
+            is_preview = (ch == "preview")
             yt_data = generate_channel_script("youtube", article)
             yt_title = (yt_data.get("title") or article["h1"]).strip()[:98]
             yt_short_loc = (yt_data.get("short_location_name") or re.split(r"[:|–—?-]", article["h1"])[0]).strip()
@@ -1501,17 +1650,18 @@ def main():
             yt_full_desc = enforce_varied_bare_link_plain(yt_raw_desc, article_url, yt_short_loc, max_chars=4600)
             yt_tags = (yt_data.get("tags") or f"du lịch checkin, {yt_short_loc}, du lịch việt nam").strip()
 
-            # Build dedicated ~4.5 - 5 minute (2-chapter) HD video exclusively for YouTube
-            yt_mp3_path = WORK_DIR / f"{slug}-youtube-5min.mp3"
+            # Build dedicated ~4.5 - 5 minute (2-chapter, 34-38 scenes) HD video
+            file_tag = "preview-5min" if is_preview else "youtube-5min"
+            yt_mp3_path = WORK_DIR / f"{slug}-{file_tag}.mp3"
             style_dir = (
                 "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
             )
             ch1_speech = (yt_data.get("chapter1_speech") or yt_data.get("speech_script") or "").strip()
             ch2_speech = (yt_data.get("chapter2_speech") or "").strip()
             yt_duration = call_gemini_tts_two_chapters_to_mp3(ch1_speech, ch2_speech, style_dir, yt_mp3_path, key_offset=3)
-            print(f"Generated Dedicated 5-Min YouTube Voice MP3 (2 Chapters + Studio BGM): {yt_mp3_path.name} ({yt_duration:.1f}s)")
+            print(f"Generated Dedicated 5-Min Voice MP3 (2 Chapters + Studio BGM): {yt_mp3_path.name} ({yt_duration:.1f}s)")
 
-            yt_mp4_path = WORK_DIR / f"{slug}-youtube-5min.mp4"
+            yt_mp4_path = WORK_DIR / f"{slug}-{file_tag}.mp4"
             build_hd_video_from_images(
                 article["images"],
                 yt_mp3_path,
@@ -1519,26 +1669,36 @@ def main():
                 yt_mp4_path,
                 yt_data.get("scenes"),
                 yt_short_loc,
-                max_scenes=24,
+                max_scenes=40,
             )
-            print(f"Built Dedicated YouTube HD MP4: {yt_mp4_path.name} ({yt_mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
+            print(f"Built Dedicated 36-Scene HD MP4: {yt_mp4_path.name} ({yt_mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
             yt_mp4_url, _ = upload_mp3_to_github_release(yt_mp4_path)
 
-            yt_thumb_jpg = WORK_DIR / f"{slug}-youtube-thumb.jpg"
-            yt_thumb_url = build_youtube_thumbnail_1280x720(article["images"], yt_title, yt_short_loc, yt_thumb_jpg)
-            print(f"Prepared YouTube 5-Min HD Video Package: '{yt_title}' ({yt_duration:.1f}s) | MP4: {yt_mp4_url} | Thumb: {yt_thumb_url}")
+            if is_preview:
+                print(f"=== PREVIEW VIDEO READY (NOT POSTED TO YOUTUBE) ===\nDirect MP4 URL: {yt_mp4_url}")
+                update_status_json(article_url, "preview", {
+                    "title": yt_title,
+                    "mp4_url": yt_mp4_url,
+                    "scene_count": len(yt_data.get("scenes") or []),
+                    "duration_sec": round(yt_duration, 1),
+                    "published_at": now_str,
+                })
+            else:
+                yt_thumb_jpg = WORK_DIR / f"{slug}-youtube-thumb.jpg"
+                yt_thumb_url = build_youtube_thumbnail_1280x720(article["images"], yt_title, yt_short_loc, yt_thumb_jpg)
+                print(f"Prepared YouTube 5-Min HD Video Package: '{yt_title}' ({yt_duration:.1f}s) | MP4: {yt_mp4_url} | Thumb: {yt_thumb_url}")
 
-            update_status_json(article_url, "youtube", {
-                "title": yt_title,
-                "description": yt_full_desc,
-                "tags": yt_tags,
-                "mp4_url": yt_mp4_url,
-                "thumb_url": yt_thumb_url,
-                "video_url": "",
-                "duration_sec": round(yt_duration, 1),
-                "ready_for_yt": True,
-                "published_at": now_str,
-            })
+                update_status_json(article_url, "youtube", {
+                    "title": yt_title,
+                    "description": yt_full_desc,
+                    "tags": yt_tags,
+                    "mp4_url": yt_mp4_url,
+                    "thumb_url": yt_thumb_url,
+                    "video_url": "",
+                    "duration_sec": round(yt_duration, 1),
+                    "ready_for_yt": True,
+                    "published_at": now_str,
+                })
 
         elif ch == "bluesky":
             mp4_path, mp4_release_url, duration, short_loc, _ = get_or_build_hd_video(article, slug, now_str)
