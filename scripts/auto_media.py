@@ -6,11 +6,13 @@ Auto Media Engine for dulichcheckin.com
 - Dailymotion HD Video (MP4 Ken Burns + Voice Aoede - Style C: Visual Highlights)
 """
 
+import array
 import base64
 import datetime
 import email.utils
 import html
 import json
+import math
 import os
 import random
 import re
@@ -113,33 +115,68 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
         imgs.append(clean_u)
         image_items.append({"url": clean_u, "desc": desc_label})
 
-    # Optional: search 2-3 verified external images from Wikipedia VI / Wikimedia matching the exact location name
+    # Search 5-8 external images from Wikipedia VI + Wikimedia Commons + Flickr Public Feed
     loc_short = re.split(r"[:|–—?-]", h1_title)[0].strip()
     if len(loc_short) >= 4:
+        loc_slug_words = [w for w in to_seo_slug(loc_short).split("-") if len(w) > 2]
+        # 1. Wikipedia VI
+        try:
+            vi_url = (
+                "https://vi.wikipedia.org/w/api.php?action=query&generator=search"
+                f"&gsrsearch={urllib.parse.quote(loc_short)}&gsrlimit=5&prop=pageimages&pithumbsize=1280&format=json"
+            )
+            vr = requests.get(vi_url, headers=headers, timeout=10)
+            if vr.status_code == 200:
+                for p in vr.json().get("query", {}).get("pages", {}).values():
+                    iu = (p.get("thumbnail") or {}).get("source", "")
+                    if re.search(r"\.(?:jpg|jpeg|png)$", iu, re.I) and not re.search(r"map|icon|logo|flag", iu, re.I):
+                        if iu not in imgs:
+                            imgs.append(iu)
+                            image_items.append({"url": iu, "desc": f"Ảnh tư liệu {p.get('title', loc_short)}"})
+        except Exception:
+            pass
+
+        # 2. Wikimedia Commons
         try:
             w_url = (
                 "https://commons.wikimedia.org/w/api.php?action=query&generator=search"
-                f"&gsrsearch=filetype:bitmap|{urllib.parse.quote(loc_short)}&gsrlimit=6"
-                "&prop=imageinfo&iiprop=url|extmetadata&format=json"
+                f"&gsrsearch=filetype:bitmap|{urllib.parse.quote(loc_short)}&gsrlimit=10"
+                "&prop=imageinfo&iiprop=url&format=json"
             )
             wr = requests.get(w_url, headers=headers, timeout=12)
             if wr.status_code == 200:
                 pages = wr.json().get("query", {}).get("pages", {})
-                loc_slug_words = [w for w in to_seo_slug(loc_short).split("-") if len(w) > 2]
                 ext_added = 0
                 for p in pages.values():
                     t_slug = to_seo_slug(p.get("title", ""))
-                    if loc_slug_words and not all(w in t_slug for w in loc_slug_words[:2]):
+                    if loc_slug_words and not any(w in t_slug for w in loc_slug_words[:2]):
                         continue
                     ii = (p.get("imageinfo") or [{}])[0]
                     iu = ii.get("url", "")
                     if re.search(r"\.(?:jpg|jpeg|png)$", iu, re.I) and not re.search(r"map|icon|logo|flag|stamp", iu, re.I):
                         if iu not in imgs:
                             imgs.append(iu)
-                            image_items.append({"url": iu, "desc": f"Ảnh góc nhìn thực tế {loc_short} ({p.get('title', '').replace('File:', '')})"})
+                            clean_ft = p.get("title", "").replace("File:", "").rsplit(".", 1)[0]
+                            image_items.append({"url": iu, "desc": f"Góc nhìn thực tế {loc_short} ({clean_ft})"})
                             ext_added += 1
-                            if ext_added >= 3:
+                            if ext_added >= 5:
                                 break
+        except Exception:
+            pass
+
+        # 3. Flickr Public Photos Feed
+        try:
+            f_tags = ",".join(loc_slug_words[:3])
+            f_url = f"https://api.flickr.com/services/feeds/photos_public.gne?tags={urllib.parse.quote(f_tags)},vietnam&tagmode=all&format=json&nojsoncallback=1"
+            fr = requests.get(f_url, headers=headers, timeout=10)
+            if fr.status_code == 200:
+                for it in (fr.json().get("items") or [])[:4]:
+                    mu = (it.get("media") or {}).get("m", "")
+                    if mu:
+                        hi_u = re.sub(r"_m\.jpg$", "_b.jpg", mu, flags=re.I)
+                        if hi_u not in imgs:
+                            imgs.append(hi_u)
+                            image_items.append({"url": hi_u, "desc": f"Khung cảnh thực tế {loc_short} ({it.get('title', '')})"})
         except Exception:
             pass
 
@@ -151,10 +188,10 @@ def scrape_article(article_url: str, fallback_h1: str = "") -> dict:
     return {
         "url": article_url,
         "h1": h1_title,
-        "outline": " | ".join(headings[:15]),
-        "content": body[:12000],
-        "images": imgs[:16],
-        "image_items": image_items[:16],
+        "outline": " | ".join(headings[:18]),
+        "content": body[:13500],
+        "images": imgs[:22],
+        "image_items": image_items[:22],
     }
 
 
@@ -187,64 +224,137 @@ def call_gemini_json(prompt: str, key_offset: int = 0) -> dict:
     raise RuntimeError(f"Gemini JSON failed: {last_err}")
 
 
+def mix_studio_bgm_into_pcm(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:
+    """Apply warm broadcast vocal boost + mix gentle acoustic pentatonic BGM (1.2s intro, ducked under voice, 1.8s outro)."""
+    voice_arr = array.array("h")
+    voice_arr.frombytes(pcm_bytes)
+    v_len = len(voice_arr)
+
+    intro_len = int(sample_rate * 1.2)
+    outro_len = int(sample_rate * 1.8)
+    total_len = intro_len + v_len + outro_len
+    out_arr = array.array("h", [0]) * total_len
+
+    melody_notes = [293.66, 349.23, 440.00, 523.25, 440.00, 392.00, 349.23, 440.00, 587.33, 523.25, 440.00, 349.23]
+    bass_notes = [146.83, 146.83, 174.61, 174.61, 130.81, 130.81, 146.83, 146.83, 174.61, 174.61, 130.81, 146.83]
+    note_dur = 1.15
+    two_pi = 2.0 * math.pi
+    total_sec = total_len / float(sample_rate)
+
+    prev_v = 0.0
+    for i in range(total_len):
+        t = i / float(sample_rate)
+        if intro_len <= i < intro_len + v_len:
+            v_raw = float(voice_arr[i - intro_len])
+            v_warm = v_raw * 1.15 + prev_v * 0.18
+            prev_v = v_raw
+            duck = 0.58
+        else:
+            v_warm = 0.0
+            prev_v = 0.0
+            duck = 1.0
+
+        step_idx = int(t // note_dur)
+        n_idx = step_idx % len(melody_notes)
+        n_time = t - (step_idx * note_dur)
+        freq = melody_notes[n_idx]
+        bfreq = bass_notes[n_idx]
+
+        p_env = min(1.0, n_time / 0.04) * math.exp(-2.0 * n_time)
+        pluck = (
+            math.sin(two_pi * freq * t) * 0.65
+            + math.sin(two_pi * (freq * 2.0) * t) * 0.22
+            + math.sin(two_pi * (freq * 3.0) * t) * 0.08
+        ) * p_env
+
+        pad_env = min(1.0, n_time / 0.25) * math.exp(-0.45 * n_time)
+        pad = (
+            math.sin(two_pi * bfreq * t) * 0.50
+            + math.sin(two_pi * (bfreq * 1.5) * t) * 0.35
+            + math.sin(two_pi * (bfreq * 2.0) * t) * 0.20
+        ) * pad_env
+
+        if t < 0.8:
+            fade = t / 0.8
+        elif (total_sec - t) < 1.5:
+            fade = max(0.0, (total_sec - t) / 1.5)
+        else:
+            fade = 1.0
+
+        bgm = (pluck * 3400.0 + pad * 2200.0) * duck * fade
+        val = int(round(v_warm + bgm))
+        if val > 32767:
+            val = 32767
+        elif val < -32768:
+            val = -32768
+        out_arr[i] = val
+
+    return out_arr.tobytes()
+
+
 def call_gemini_tts_to_mp3(speech_script: str, style_direction: str, out_mp3: Path, key_offset: int = 0) -> float:
     full_prompt = f"{style_direction}\n\n{speech_script}"
+    # Prioritize gemini-2.5-flash-preview-tts (approved best natural Vietnamese broadcaster voice!)
+    tts_models = ["gemini-2.5-flash-preview-tts", "gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
     last_err = ""
-    for k_try in range(len(GEMINI_KEYS)):
-        key = GEMINI_KEYS[(key_offset + k_try) % len(GEMINI_KEYS)]
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={urllib.parse.quote(key)}"
-        payload = {
-            "contents": [{"parts": [{"text": full_prompt}]}],
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {"voiceName": VOICE_NAME}
-                    }
+    for m_name in tts_models:
+        for k_try in range(len(GEMINI_KEYS)):
+            key = GEMINI_KEYS[(key_offset + k_try) % len(GEMINI_KEYS)]
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={urllib.parse.quote(key)}"
+            payload = {
+                "contents": [{"parts": [{"text": full_prompt}]}],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": {"voiceName": VOICE_NAME}
+                        }
+                    },
                 },
-            },
-        }
-        try:
-            r = requests.post(url, json=payload, timeout=120)
-            if r.status_code == 200:
-                inline = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
-                mime = inline.get("mimeType", "audio/L16;codec=pcm;rate=24000")
-                sr_m = re.search(r"rate=(\d+)", mime)
-                sample_rate = int(sr_m.group(1)) if sr_m else 24000
-                pcm_bytes = base64.b64decode(inline["data"])
+            }
+            try:
+                r = requests.post(url, json=payload, timeout=120)
+                if r.status_code == 200:
+                    inline = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
+                    mime = inline.get("mimeType", "audio/L16;codec=pcm;rate=24000")
+                    sr_m = re.search(r"rate=(\d+)", mime)
+                    sample_rate = int(sr_m.group(1)) if sr_m else 24000
+                    pcm_bytes = base64.b64decode(inline["data"])
 
-                raw_pcm = out_mp3.with_suffix(".pcm")
-                raw_pcm.write_bytes(pcm_bytes)
+                    # Mix warm broadcast studio filter + gentle background music (1.2s intro + ducked BGM + 1.8s outro)
+                    mixed_pcm = mix_studio_bgm_into_pcm(pcm_bytes, sample_rate)
 
-                subprocess.run(
-                    [
-                        "ffmpeg", "-y",
-                        "-f", "s16le", "-ar", str(sample_rate), "-ac", "1",
-                        "-i", str(raw_pcm),
-                        "-codec:a", "libmp3lame", "-b:a", "128k",
-                        str(out_mp3),
-                    ],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                raw_pcm.unlink(missing_ok=True)
-                # Get exact duration
-                probe = subprocess.check_output(
-                    [
-                        "ffprobe", "-v", "error",
-                        "-show_entries", "format=duration",
-                        "-of", "default=noprint_wrappers=1:nokey=1",
-                        str(out_mp3),
-                    ],
-                    text=True,
-                ).strip()
-                return float(probe)
-            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
-            if r.status_code in (429, 503):
-                time.sleep(3)
-        except Exception as e:
-            last_err = str(e)
+                    raw_pcm = out_mp3.with_suffix(".pcm")
+                    raw_pcm.write_bytes(mixed_pcm)
+
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-y",
+                            "-f", "s16le", "-ar", str(sample_rate), "-ac", "1",
+                            "-i", str(raw_pcm),
+                            "-codec:a", "libmp3lame", "-b:a", "128k",
+                            str(out_mp3),
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    raw_pcm.unlink(missing_ok=True)
+                    probe = subprocess.check_output(
+                        [
+                            "ffprobe", "-v", "error",
+                            "-show_entries", "format=duration",
+                            "-of", "default=noprint_wrappers=1:nokey=1",
+                            str(out_mp3),
+                        ],
+                        text=True,
+                    ).strip()
+                    return float(probe)
+                last_err = f"HTTP {r.status_code} ({m_name}): {r.text[:200]}"
+                if r.status_code in (429, 503):
+                    time.sleep(2)
+            except Exception as e:
+                last_err = str(e)
     raise RuntimeError(f"Gemini TTS failed: {last_err}")
 
 
@@ -395,19 +505,29 @@ Trả về đúng JSON với 4 khóa: "short_location_name", "title", "speech_sc
         )
         prompt = f"""{base}
 
-DANH SÁCH TOÀN BỘ BỘ ẢNH THỰC TẾ SẼ HIỂN THỊ TRONG VIDEO (ĐÃ ĐỌC TỪ THẺ ALT / CHÚ THÍCH ẢNH TRÊN BÀI WEB):
+KHO ẢNH ĐA NGUỒN CỦA ĐỊA ĐIỂM (GỒM TOÀN BỘ ẢNH TRÊN BÀI WEB + ẢNH NGOÀI):
 {img_catalog}
 
-NHIỆM VỤ RIÊNG CHO VIDEO [DAILYMOTION - ĐẠO DIỄN KỊCH BẢN KHỚP TỪNG BỨC ẢNH & MÔ TẢ DÀI CHI TIẾT]:
-1. "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
-2. "title": Tiêu đề video du lịch thu hút, rõ địa điểm, có dấu tiếng Việt (45-75 ký tự).
-3. "scenes": Xem kỹ danh sách ảnh ở trên để lên kịch bản gồm 7 đến 12 phân cảnh đi qua toàn bộ bộ ảnh:
-   - Mỗi phân cảnh là 1 object {{"image_index": số_thứ_tự_ảnh, "narration": "câu thuyết minh 12-20 từ khớp chính xác với chi tiết trong bức ảnh đó"}}.
-   - Các câu "narration" khi ghép lại phải tạo thành một bài thuyết minh video hoàn chỉnh, mạch lạc, tự nhiên từ đầu đến cuối.
-4. "description": Bài viết mô tả video chuyên sâu dài khoảng 400-520 từ (tận dụng tối đa khung 2500-2900 ký tự của Dailymotion, văn bản thuần chia 4 đoạn rõ ràng bằng \\n\\n, KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL vì hệ thống sẽ tự đặt dòng dẫn + link trần ở vị trí đầu/giữa/cuối). Cung cấp trọn vẹn thông tin thực tế, lịch trình và kinh nghiệm từ bài gốc, cấu trúc KHÁC HOÀN TOÀN Spotify và Castbox.
-5. "tags": Chuỗi 5-8 từ khóa tiếng Việt ngăn cách bởi dấu phẩy.
+NHIỆM VỤ RIÊNG CHO VIDEO [DAILYMOTION - KỊCH BẢN BIÊN TẬP VIÊN TRUYỀN HÌNH MẠCH LẠC 1.5 - 2 PHÚT]:
+1. QUY TẮC SỐ 1 (ƯU TIÊN MẠCH BÀI NÓI LOGIC & ĐẦY ĐỦ THÔNG TIN TRƯỚC, KHÔNG BỊ BÓ HẸP BỞI THẺ ALT):
+   - Hãy đọc toàn bộ nội dung bài viết gốc để soạn một kịch bản thuyết minh du lịch hoàn chỉnh, sâu sắc, mạch lạc từ đầu đến cuối dài khoảng 260-340 từ (tương đương video dài 1 phút 30 giây - 2 phút).
+   - Kịch bản phải đầy đủ thông tin giá trị từ bài gốc (vị trí, nguồn gốc/lịch sử/sự tích, những nét kiến trúc hoặc cảnh quan đặc sắc nhất, thời điểm tham quan, giá vé/giờ mở cửa, kinh nghiệm thực tế và lưu ý quan trọng), kể cả những thông tin không nằm trong thẻ alt ảnh!
+   - Viết theo lối văn nói Biên tập viên truyền hình ngọt ngào, điềm đạm: chủ động đặt dấu phẩy (,) và dấu gạch ngang (—) ở các nhịp chuyển ý để giọng đọc nhấn nhá truyền cảm.
+2. QUY TẮC SỐ 2 (CHIA KỊCH BẢN THÀNH 10 - 15 PHÂN CẢNH & CHỌN ẢNH MINH HỌA PHÙ HỢP):
+   - Chia bài thuyết minh hoàn chỉnh đó thành 10 đến 15 phân cảnh nối tiếp nhau ("scenes").
+   - Với mỗi phân cảnh, chọn bức ảnh phù hợp nhất trong kho ảnh trên ("image_index": số nguyên từ 0 đến {max(0, len(img_items)-1)}) và viết 1 dòng tiêu đề phụ đề ngắn gọn có dấu ("caption": 5-10 từ tóm tắt ý chính của cảnh đó để hiển thị lên thanh băng chữ truyền hình ở góc dưới video).
+   - Hãy sử dụng đa dạng hết các bức ảnh đẹp trong kho ảnh (cả ảnh bài web lẫn ảnh ngoài).
+3. "short_location_name": Tên địa điểm/chủ đề cốt lõi có dấu đầy đủ ngữ nghĩa (3-6 từ).
+4. "title": Tiêu đề video du lịch thu hút, rõ địa điểm, có dấu tiếng Việt (45-75 ký tự).
+5. "description": Bài viết mô tả video chuyên sâu dài khoảng 420-550 từ (tận dụng tối đa khung 2600-2950 ký tự của Dailymotion, văn bản thuần chia 4 đoạn rõ ràng bằng \\n\\n, KHÔNG dùng thẻ HTML, KHÔNG tự chèn URL).
+6. "tags": Chuỗi 5-8 từ khóa tiếng Việt ngăn cách bởi dấu phẩy.
 
-Trả về đúng JSON với 5 khóa: "short_location_name", "title", "scenes", "description", "tags"."""
+Trả về đúng JSON với 5 khóa:
+- "short_location_name": chuỗi
+- "title": chuỗi
+- "scenes": mảng 10-15 object [{{"image_index": số_nguyên, "caption": "Dòng tiêu đề ngắn 5-10 từ hiện trên màn hình", "narration": "Đoạn lời bình 18-28 từ của biên tập viên"}}]
+- "description": chuỗi
+- "tags": chuỗi"""
         res = call_gemini_json(prompt, key_offset=2)
         if not isinstance(res, dict):
             res = {}
@@ -421,7 +541,7 @@ Trả về đúng JSON với 5 khóa: "short_location_name", "title", "scenes", 
         if not res.get("title"):
             res["title"] = article["h1"]
         if not res.get("description"):
-            res["description"] = article["content"][:1800]
+            res["description"] = article["content"][:2200]
         return res
 
     raise ValueError(f"Unknown channel: {channel}")
@@ -466,6 +586,60 @@ def ensure_cover_images():
         img.save(fpath, "JPEG", quality=92)
 
 
+def build_episode_cover_1400(image_urls: list[str], short_loc: str, out_jpg: Path) -> str:
+    """Create a 1400x1400 square episode cover from the article's real photo and upload to GitHub Release."""
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://dulichcheckin.com/",
+    }
+    src_im = None
+    for u in image_urls[:5]:
+        try:
+            r = requests.get(u, headers=headers, timeout=15)
+            if r.status_code == 200 and len(r.content) > 6000:
+                tmp_p = WORK_DIR / "ep_cov_raw"
+                tmp_p.write_bytes(r.content)
+                src_im = Image.open(tmp_p).convert("RGB")
+                tmp_p.unlink(missing_ok=True)
+                break
+        except Exception:
+            continue
+
+    if src_im is None:
+        return ""
+
+    # 1400x1400 square canvas: blurred backdrop + crisp full image centered + subtle brand badge
+    bg = ImageOps.fit(src_im, (1400, 1400), method=Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(28))
+    bg = ImageEnhance.Brightness(bg).enhance(0.58)
+
+    fg = ImageOps.contain(src_im, (1320, 1140), method=Image.Resampling.LANCZOS)
+    fw, fh = fg.size
+    fx = (1400 - fw) // 2
+    fy = (1260 - fh) // 2
+
+    draw = ImageDraw.Draw(bg)
+    # Soft shadow & white frame
+    draw.rectangle([fx - 6, fy - 6, fx + fw + 6, fy + fh + 6], fill=(255, 255, 255))
+    bg.paste(fg, (fx, fy))
+
+    # Bottom title bar
+    draw.rectangle([0, 1265, 1400, 1400], fill=(15, 23, 42))
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    font_path = next((p for p in font_paths if os.path.exists(p)), None)
+    f_title = ImageFont.truetype(font_path, 44) if font_path else ImageFont.load_default()
+    label = f"DU LỊCH CHECKIN  •  {short_loc.upper()}"[:48]
+    draw.text((700, 1332), label, fill=(254, 240, 138), font=f_title, anchor="mm")
+
+    bg.save(out_jpg, "JPEG", quality=92)
+    cov_url, _ = upload_mp3_to_github_release(out_jpg)
+    return cov_url
+
+
 def upload_mp3_to_github_release(mp3_path: Path) -> tuple[str, int]:
     """Upload MP3 to GitHub Release tag 'audio-files' and return (direct_url, byte_size)."""
     headers = {
@@ -501,7 +675,8 @@ def upload_mp3_to_github_release(mp3_path: Path) -> tuple[str, int]:
 
     # 3. Upload asset
     upload_url = f"https://uploads.github.com/repos/{REPO}/releases/{release_id}/assets?name={urllib.parse.quote(asset_name)}"
-    ctype = "video/mp4" if asset_name.lower().endswith(".mp4") else "audio/mpeg"
+    low_name = asset_name.lower()
+    ctype = "video/mp4" if low_name.endswith(".mp4") else ("image/jpeg" if low_name.endswith(".jpg") else "audio/mpeg")
     up_headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
         "Content-Type": ctype,
@@ -520,7 +695,7 @@ def format_duration_hms(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: str, mp3_url: str, mp3_size: int, duration_sec: float, short_loc: str):
+def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: str, mp3_url: str, mp3_size: int, duration_sec: float, short_loc: str, ep_cover_url: str = ""):
     rss_file = ROOT_DIR / f"{channel}.xml"
     is_spotify = (channel == "spotify")
     show_title = "Du Lịch Checkin - Trải Nghiệm Việt Nam" if is_spotify else "Cam Nang Du Lich Checkin"
@@ -532,6 +707,7 @@ def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: s
         else "Chuyên mục cẩm nang du lịch thực tế, chia sẻ lịch trình, mẹo di chuyển và kinh nghiệm tham quan chi tiết từ dulichcheckin.com."
     )
     cover_url = f"{PAGES_BASE}/cover-{channel}.jpg"
+    item_image_url = ep_cover_url or cover_url
     feed_url = f"{PAGES_BASE}/{channel}.xml"
 
     existing_items = []
@@ -560,6 +736,7 @@ def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: s
       <pubDate>{pub_date}</pubDate>
       <description><![CDATA[{final_desc_cdata}]]></description>
       <enclosure url="{html.escape(mp3_url)}" length="{mp3_size}" type="audio/mpeg"/>
+      <itunes:image href="{html.escape(item_image_url)}"/>
       <itunes:title>{html.escape(ep_title)}</itunes:title>
       <itunes:author>Du Lịch Checkin</itunes:author>
       <itunes:summary>{html.escape(plain_summary)}</itunes:summary>
@@ -601,45 +778,111 @@ def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: s
     return feed_url
 
 
-def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_sec: float, out_mp4: Path, scenes: list | None = None):
-    """Build a crisp 1280x720 HD slideshow video where each image & its duration match the exact spoken scene."""
-    from PIL import Image, ImageOps
+def render_tv_frame_1280x720(raw_im, caption_text: str, short_loc: str, scene_num: int, total_scenes: int):
+    """Render 100% uncropped image on a blurred matching backdrop with 3D shadow frame & TV lower-third caption bar."""
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+
+    # 1. Blurred full-screen 1280x720 backdrop from the image itself
+    bg = ImageOps.fit(raw_im, (1280, 720), method=Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(26))
+    bg = ImageEnhance.Brightness(bg).enhance(0.50)
+    canvas = bg.convert("RGBA")
+
+    # 2. 100% UNCROPPED foreground photo (contain inside 1140x565 area above the caption bar)
+    fg = ImageOps.contain(raw_im, (1140, 565), method=Image.Resampling.LANCZOS)
+    fw, fh = fg.size
+    fx = (1280 - fw) // 2
+    fy = 24 + (575 - fh) // 2
+
+    # 3. 3D Drop Shadow + crisp white border frame
+    overlay = Image.new("RGBA", (1280, 720), (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+    odraw.rounded_rectangle([fx + 8, fy + 10, fx + fw + 14, fy + fh + 14], radius=10, fill=(0, 0, 0, 145))
+    overlay = overlay.filter(ImageFilter.GaussianBlur(8))
+    canvas = Image.alpha_composite(canvas, overlay)
+
+    cdraw = ImageDraw.Draw(canvas)
+    cdraw.rounded_rectangle([fx - 4, fy - 4, fx + fw + 4, fy + fh + 4], radius=6, fill=(255, 255, 255, 245))
+    canvas.paste(fg.convert("RGBA"), (fx, fy))
+
+    # 4. Sleek TV Lower-Third Caption Bar + Top-Right Brand Badge
+    ui_layer = Image.new("RGBA", (1280, 720), (0, 0, 0, 0))
+    udraw = ImageDraw.Draw(ui_layer)
+
+    # Top-right subtle brand pill
+    udraw.rounded_rectangle([1015, 18, 1254, 54], radius=18, fill=(15, 23, 42, 195), outline=(254, 240, 138, 180), width=2)
+    # Bottom lower-third banner
+    udraw.rounded_rectangle([60, 622, 1220, 702], radius=12, fill=(15, 23, 42, 220), outline=(56, 189, 248, 200), width=2)
+    udraw.rounded_rectangle([60, 622, 72, 702], radius=6, fill=(250, 204, 21, 255))
+
+    canvas = Image.alpha_composite(canvas, ui_layer)
+    fdraw = ImageDraw.Draw(canvas)
+
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    font_path = next((p for p in font_paths if os.path.exists(p)), None)
+    f_badge = ImageFont.truetype(font_path, 19) if font_path else ImageFont.load_default()
+    f_loc = ImageFont.truetype(font_path, 18) if font_path else ImageFont.load_default()
+    f_cap = ImageFont.truetype(font_path, 26) if font_path else ImageFont.load_default()
+
+    fdraw.text((1134, 36), "dulichcheckin.com", fill=(254, 240, 138, 255), font=f_badge, anchor="mm")
+    loc_header = f"DU LỊCH CHECKIN  •  {short_loc.upper()} ({scene_num}/{total_scenes})"[:65]
+    fdraw.text((92, 642), loc_header, fill=(125, 211, 252, 255), font=f_loc, anchor="lm")
+    clean_cap = (caption_text or short_loc)[:68]
+    fdraw.text((92, 676), clean_cap, fill=(255, 255, 255, 255), font=f_cap, anchor="lm")
+
+    return canvas.convert("RGB")
+
+
+def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_sec: float, out_mp4: Path, scenes: list | None = None, short_loc: str = "Du lịch Việt Nam"):
+    """Build a crisp 1280x720 HD video with 100% uncropped images, blurred backdrop, TV captions & smooth transitions."""
+    from PIL import Image
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Referer": "https://dulichcheckin.com/",
     }
 
-    # Build ordered list of (image_url, weight_words) from Gemini's scene-by-scene plan
+    # Build ordered list of (image_url, weight_words, caption_text) from Gemini's scene-by-scene plan
     ordered_specs = []
     if scenes and isinstance(scenes, list) and image_urls:
+        used_indices = set()
         for sc in scenes:
+            if not isinstance(sc, dict):
+                continue
             idx = sc.get("image_index", 0)
-            if not isinstance(idx, int) or idx < 0 or idx >= len(image_urls):
-                idx = min(len(ordered_specs), len(image_urls) - 1)
-            words = max(4, len(str(sc.get("narration", "")).split()))
-            ordered_specs.append((image_urls[idx], words))
+            if not isinstance(idx, int) or idx < 0 or idx >= len(image_urls) or idx in used_indices:
+                # Pick next unused image so all photos in pool get shown
+                unused = [i for i in range(len(image_urls)) if i not in used_indices]
+                idx = unused[0] if unused else (len(ordered_specs) % len(image_urls))
+            used_indices.add(idx)
+            words = max(5, len(str(sc.get("narration", "")).split()))
+            cap = str(sc.get("caption") or sc.get("narration") or short_loc).strip()
+            ordered_specs.append((image_urls[idx], words, cap))
 
     if not ordered_specs:
-        for u in image_urls[:12]:
-            ordered_specs.append((u, 15))
+        for u in image_urls[:15]:
+            ordered_specs.append((u, 18, short_loc))
 
     dl_imgs = []
     weights = []
-    for idx, (u, w) in enumerate(ordered_specs[:14]):
+    total_spec_count = min(16, len(ordered_specs))
+    for idx, (u, w, cap) in enumerate(ordered_specs[:16]):
         try:
             r = requests.get(u, headers=headers, timeout=20)
             if r.status_code == 200 and len(r.content) > 5000:
                 raw_p = WORK_DIR / f"raw_{idx}"
                 raw_p.write_bytes(r.content)
-                p = WORK_DIR / f"slide_{idx}.jpg"
-                im = Image.open(raw_p).convert("RGB")
-                im = ImageOps.fit(im, (1280, 720), method=Image.Resampling.LANCZOS)
-                im.save(p, "JPEG", quality=92)
+                raw_im = Image.open(raw_p).convert("RGB")
                 raw_p.unlink(missing_ok=True)
+
+                tv_frame = render_tv_frame_1280x720(raw_im, cap, short_loc, len(dl_imgs) + 1, total_spec_count)
+                p = WORK_DIR / f"slide_{idx}.jpg"
+                tv_frame.save(p, "JPEG", quality=93)
                 dl_imgs.append(p)
                 weights.append(w)
-                print(f"Scene #{len(dl_imgs)} ({w} words) -> image: {u}")
+                print(f"Scene #{len(dl_imgs)} ({w} words | '{cap[:35]}') -> image: {u}")
         except Exception as e:
             print(f"Skip image {u}: {e}")
             continue
@@ -653,14 +896,16 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
     clip_paths = []
 
     for i, (img_p, w) in enumerate(zip(dl_imgs, weights)):
-        seg_dur = max(2.2, total_target * (w / total_w))
+        seg_dur = max(2.5, total_target * (w / total_w))
         clip_p = WORK_DIR / f"clip_{i}.mp4"
+        fade_Out_st = max(0.5, seg_dur - 0.35)
+        vf_str = f"scale=1280:720,fade=t=in:st=0:d=0.35,fade=t=out:st={fade_Out_st:.2f}:d=0.35,format=yuv420p"
         subprocess.run(
             [
                 "ffmpeg", "-y",
                 "-loop", "1", "-t", f"{seg_dur:.2f}",
                 "-i", str(img_p),
-                "-vf", "scale=1280:720,fade=t=in:st=0:d=0.35,format=yuv420p",
+                "-vf", vf_str,
                 "-r", "25",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
                 "-an", str(clip_p),
@@ -794,27 +1039,28 @@ def main():
 
         mp3_path = WORK_DIR / f"{slug}-{ch}.mp3"
         style_dir = (
-            "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, truyền cảm như biên tập viên du lịch đang trò chuyện:"
-            if ch != "dailymotion"
-            else "Hãy đọc đoạn thuyết minh video du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, tươi tắn, nhịp độ gọn gàng cuốn hút:"
+            "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
         )
         duration = call_gemini_tts_to_mp3(speech, style_dir, mp3_path, key_offset=channels.index(ch))
-        print(f"Generated MP3: {mp3_path.name} ({duration:.1f}s)")
+        print(f"Generated MP3 (with Studio BGM): {mp3_path.name} ({duration:.1f}s)")
 
         if ch in ("spotify", "castbox"):
             mp3_url, mp3_size = upload_mp3_to_github_release(mp3_path)
-            feed_url = update_podcast_rss(ch, ep_title, desc, article_url, mp3_url, mp3_size, duration, short_loc)
-            print(f"Updated {ch}.xml -> {feed_url} | MP3: {mp3_url}")
+            ep_cov_jpg = WORK_DIR / f"{slug}-{ch}-cover.jpg"
+            ep_cov_url = build_episode_cover_1400(article["images"], short_loc, ep_cov_jpg)
+            feed_url = update_podcast_rss(ch, ep_title, desc, article_url, mp3_url, mp3_size, duration, short_loc, ep_cov_url)
+            print(f"Updated {ch}.xml -> {feed_url} | MP3: {mp3_url} | Cover: {ep_cov_url}")
             update_status_json(article_url, ch, {
                 "title": ep_title,
                 "mp3_url": mp3_url,
+                "cover_url": ep_cov_url,
                 "feed_url": feed_url,
                 "duration_sec": round(duration, 1),
                 "published_at": now_str,
             })
         elif ch == "dailymotion":
             mp4_path = WORK_DIR / f"{slug}-dailymotion.mp4"
-            build_hd_video_from_images(article["images"], mp3_path, duration, mp4_path, script_data.get("scenes"))
+            build_hd_video_from_images(article["images"], mp3_path, duration, mp4_path, script_data.get("scenes"), short_loc)
             print(f"Built HD MP4: {mp4_path.name} ({mp4_path.stat().st_size / 1024 / 1024:.2f} MB)")
             # Always upload HD MP4 to GitHub Releases so user can watch/download immediately!
             mp4_release_url, _ = upload_mp3_to_github_release(mp4_path)
