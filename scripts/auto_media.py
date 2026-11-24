@@ -280,7 +280,8 @@ def enforce_spotify_html_link(raw_html: str, article_url: str, short_loc: str) -
         if pattern.search(p_html):
             paras[target_idx] = pattern.sub(f'<a href="{article_url}">{short_loc}</a>', p_html, count=1)
         else:
-            anchor_sentence = f' {lead.replace(short_loc, f\'<a href="{article_url}">{short_loc}</a>\')}.'
+            anchor_tag = f'<a href="{article_url}">{short_loc}</a>'
+            anchor_sentence = " " + lead.replace(short_loc, anchor_tag) + "."
             paras[target_idx] = re.sub(r"</p>\s*$", anchor_sentence + "</p>", p_html, flags=re.I)
     else:
         bare_p = f'<p>{lead}: <a href="{article_url}">{article_url}</a></p>'
