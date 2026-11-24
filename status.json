@@ -13,6 +13,14 @@
       "feed_url": "https://dulichcheckin.github.io/media/castbox.xml",
       "duration_sec": 83.3,
       "published_at": "24/11/2026 09:55"
+    },
+    "dailymotion": {
+      "title": "Khám phá Đền Bạch Mã ngôi đền cổ nhất Thăng Long tứ trấn",
+      "mp4_url": "https://github.com/dulichcheckin/media/releases/download/audio-files/den-bach-ma-su-tich-van-khan-kinh-nghiem-di-le-dailymotion.mp4",
+      "video_url": "",
+      "dm_status": "Dailymotion publish failed HTTP 403: {\"error\":{\"more_info\":\"https:\\/\\/developer.dailymotion.com\\/api#error-codes\",\"code\":403,\"message\":\"This video has exceeded maximum duration allowed\",\"type\":\"access_forbidden\",\"error_data\":{\"reason\":\"video_duration_exceeded\",\"param\":\"url\"}}}",
+      "duration_sec": 47.2,
+      "published_at": "24/11/2026 10:27"
     }
   }
 }
