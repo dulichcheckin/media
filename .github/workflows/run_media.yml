@@ -47,7 +47,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --quiet requests Pillow
+          pip install --quiet requests Pillow faster-whisper
           which ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
 
       - name: Generate Audio/Video & Publish
