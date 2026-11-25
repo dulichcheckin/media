@@ -32,6 +32,20 @@
       "status": "ok",
       "duration_sec": 118.7,
       "published_at": "25/11/2026 06:12"
+    },
+    "video_cache": {
+      "mp4_url": "https://github.com/dulichcheckin/media/releases/download/audio-files/den-bach-ma-su-tich-van-khan-kinh-nghiem-di-le-hd-video.mp4",
+      "duration_sec": 117.3,
+      "short_loc": "Đền Bạch Mã Hà Nội",
+      "cached_at": "25/11/2026 09:40"
+    },
+    "archive": {
+      "title": "Tư Liệu Lịch Sử Kiến Trúc Và Kinh Nghiệm Đi Lễ Đền Bạch Mã Hà Nội",
+      "archive_url": "https://archive.org/details/dulichcheckin-den-bach-ma-su-tich-van-khan-kinh-nghiem-d-f45f30",
+      "mp4_url": "https://github.com/dulichcheckin/media/releases/download/audio-files/den-bach-ma-su-tich-van-khan-kinh-nghiem-di-le-hd-video.mp4",
+      "status": "ok",
+      "duration_sec": 117.3,
+      "published_at": "25/11/2026 09:40"
     }
   },
   "https://dulichcheckin.com/den-cap-tien-kinh-nghiem-sam-le-van-khan-chi-tiet/": {
