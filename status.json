@@ -64,8 +64,8 @@
       "title": "Kinh nghiệm đi lễ đền Cặp Tiên Vân Đồn và khám phá Giếng Tiên kỳ bí",
       "mp4_url": "https://github.com/dulichcheckin/media/releases/download/audio-files/den-cap-tien-kinh-nghiem-sam-le-van-khan-chi-tiet-preview-5min.mp4",
       "scene_count": 40,
-      "duration_sec": 311.8,
-      "published_at": "24/11/2026 23:52"
+      "duration_sec": 322.2,
+      "published_at": "25/11/2026 19:36"
     },
     "yt_checkpoint": {
       "seo_meta": {
@@ -323,7 +323,7 @@
         }
       ],
       "voice_mp3_url": "https://github.com/dulichcheckin/media/releases/download/audio-files/den-cap-tien-kinh-nghiem-sam-le-van-khan-chi-tiet-preview-5min.mp3",
-      "voice_duration_sec": 311.8,
+      "voice_duration_sec": 322.2,
       "bgm_v2": true,
       "scene_durations_v2": [
         10.14,
@@ -366,6 +366,49 @@
         4.86,
         7.5,
         7.931
+      ],
+      "whisper_4chunk_v3": true,
+      "scene_durations_v3": [
+        8.84,
+        8.9,
+        9.4,
+        9.22,
+        8.26,
+        9.56,
+        9.5,
+        8.86,
+        8.8,
+        9.621,
+        7.75,
+        7.6,
+        8.04,
+        7.72,
+        7.1,
+        7.56,
+        7.56,
+        7.12,
+        6.96,
+        7.281,
+        7.53,
+        8.24,
+        7.46,
+        7.26,
+        7.56,
+        6.8,
+        8.0,
+        7.62,
+        7.12,
+        7.781,
+        7.93,
+        9.14,
+        8.36,
+        8.18,
+        8.52,
+        7.52,
+        6.96,
+        7.54,
+        7.24,
+        9.831
       ]
     }
   }
