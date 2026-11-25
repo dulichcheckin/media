@@ -46,6 +46,13 @@ WORK_DIR = ROOT_DIR / "_tmp_media"
 WORK_DIR.mkdir(exist_ok=True)
 
 
+def to_unaccented_ascii(text: str) -> str:
+    """Convert Vietnamese text to unaccented ASCII while preserving punctuation/spaces."""
+    s = unicodedata.normalize("NFD", str(text or ""))
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    return s.replace("đ", "d").replace("Đ", "D")
+
+
 def to_clean_unaccented_title(text: str) -> str:
     """Convert Vietnamese title to clean unaccented letters/numbers only (for Castbox 100% clean SEO URL)."""
     s = unicodedata.normalize("NFD", text or "")
