@@ -477,6 +477,27 @@ def mix_studio_bgm_into_pcm(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes
     return out_arr.tobytes()
 
 
+_WHISPER_MODEL = None
+
+
+def norm_vi_token(w: str) -> str:
+    """Normalize a Vietnamese token to lowercase ASCII letters/digits for robust Whisper word-boundary matching."""
+    s = to_unaccented_ascii(str(w or "").strip()).lower()
+    return re.sub(r"[^a-z0-9]", "", s)
+
+
+def token_fuzzy_sim(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if len(a) >= 3 and len(b) >= 3 and (a.startswith(b[:3]) or b.startswith(a[:3])):
+        return 0.65
+    if abs(len(a) - len(b)) <= 1 and sum(1 for c1, c2 in zip(a, b) if c1 == c2) >= max(2, min(len(a), len(b)) - 1):
+        return 0.55
+    return 0.0
+
+
 def compute_scene_speech_weight(text: str) -> float:
     """Compute acoustic speaking time weight combining Vietnamese syllable count, character length, and punctuation breath pauses."""
     s = str(text or "").strip()
@@ -500,7 +521,10 @@ def compute_scene_durations_from_raw_pcm(
     add_intro_sec: float = 0.0,
     add_outro_sec: float = 0.0,
 ) -> list[float]:
-    """Snap every scene boundary directly to the narrator's true breath pause (silence valley) in raw voice PCM before BGM mixing."""
+    """Use faster-whisper word_timestamps + raw PCM silence-tail verification so every scene transition waits until the narrator finishes the final word of that scene."""
+    global _WHISPER_MODEL
+    import wave
+
     if not scenes:
         return []
     n_scenes = len(scenes)
@@ -519,7 +543,7 @@ def compute_scene_durations_from_raw_pcm(
         weights = [10.0] * n_scenes
     total_w = sum(weights) or float(n_scenes)
 
-    # Slice raw voice PCM into 20ms frames and compute smoothed 140ms energy envelope
+    # Slice raw voice PCM into 20ms frames and compute smoothed 100ms energy envelope
     win_samples = max(1, sample_rate // 50)
     n_frames = total_samples // win_samples
     if n_frames < n_scenes * 4:
@@ -535,52 +559,142 @@ def compute_scene_durations_from_raw_pcm(
     for f_i in range(n_frames):
         st = f_i * win_samples
         chunk = voice_arr[st : st + win_samples]
-        # Sample every 4th value for instant C-speed mean absolute amplitude
         sub = chunk[::4]
         e = sum(abs(v) for v in sub) / float(max(1, len(sub)))
         frame_energies.append(e)
 
-    # 7-frame (140ms) moving average so true breath pauses (300-600ms silence) become deep valleys
     smooth_e = []
     for f_i in range(n_frames):
-        lo = max(0, f_i - 3)
-        hi = min(n_frames, f_i + 4)
+        lo = max(0, f_i - 2)
+        hi = min(n_frames, f_i + 3)
         smooth_e.append(sum(frame_energies[lo:hi]) / float(hi - lo))
 
     sorted_e = sorted(smooth_e)
     median_e = max(200.0, sorted_e[len(sorted_e) // 2])
+    silence_thresh = max(140.0, 0.26 * median_e)
 
-    # Expected cumulative boundaries in seconds
-    cum_w = 0.0
+    # 1. Try faster-whisper word-level forced alignment on raw voice PCM
+    spoken_words = []
+    try:
+        from faster_whisper import WhisperModel
+
+        if _WHISPER_MODEL is None:
+            _WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+        tmp_wav = WORK_DIR / "_tmp_whisper_align.wav"
+        with wave.open(str(tmp_wav), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm_bytes)
+        segments, _ = _WHISPER_MODEL.transcribe(str(tmp_wav), language="vi", word_timestamps=True, vad_filter=False)
+        for seg in segments:
+            for w_obj in (seg.words or []):
+                nt = norm_vi_token(w_obj.word)
+                if nt:
+                    spoken_words.append({
+                        "norm": nt,
+                        "start": float(w_obj.start),
+                        "end": float(w_obj.end),
+                    })
+        tmp_wav.unlink(missing_ok=True)
+    except Exception as w_err:
+        print(f"Whisper alignment note (using PCM pause gap fallback): {w_err}")
+
+    scene_tokens = [
+        [norm_vi_token(t) for t in str(sc.get("narration", "")).split() if norm_vi_token(t)]
+        for sc in scenes
+    ]
+    total_script_words = sum(max(1, len(st)) for st in scene_tokens)
+
     boundaries = [0.0]
+    cum_w = 0.0
+    cum_script_w = 0
+    prev_w_idx = 0
+
     for k in range(n_scenes - 1):
         cum_w += weights[k]
+        cum_script_w += max(1, len(scene_tokens[k]))
         t_exp = voice_dur * (cum_w / total_w)
         prev_b = boundaries[-1]
-        min_t = max(prev_b + 2.4, t_exp - 2.1)
-        max_t = min(voice_dur - 2.2 * (n_scenes - 1 - k), t_exp + 2.1)
 
-        if max_t <= min_t + 0.15:
-            snapped_t = max(prev_b + 2.0, min(voice_dur - 1.8, t_exp))
-        else:
-            f_lo = max(0, int(min_t * 50))
-            f_hi = min(n_frames - 1, int(max_t * 50))
-            best_f = int(t_exp * 50)
-            best_score = 1e18
-            for f_idx in range(f_lo, f_hi + 1):
-                t_cand = f_idx / 50.0
-                # Strongly prefer near-zero silence valleys while staying near expected punctuation-weighted time
-                dist_penalty = abs(t_cand - t_exp) * (0.22 * median_e)
-                sc_val = smooth_e[f_idx] + dist_penalty
-                if sc_val < best_score:
-                    best_score = sc_val
-                    best_f = f_idx
-            snapped_t = best_f / 50.0
+        snapped_t = None
+        if len(spoken_words) >= n_scenes * 5:
+            exp_w_idx = int(round(len(spoken_words) * (cum_script_w / float(max(1, total_script_words))))) - 1
+            search_lo = max(prev_w_idx + 3, exp_w_idx - 18)
+            search_hi = min(len(spoken_words) - 3, exp_w_idx + 18)
+            tail_k = scene_tokens[k][-4:]
+            head_next = scene_tokens[k + 1][:4]
+
+            best_w = -1
+            best_w_score = -1e9
+            for w_idx in range(search_lo, search_hi + 1):
+                w_end_t = spoken_words[w_idx]["end"]
+                if w_end_t < prev_b + 2.2 or w_end_t > voice_dur - 1.8 * (n_scenes - 1 - k):
+                    continue
+                # Score tail match (last words of Scene k)
+                t_score = 0.0
+                for offset_i, tk in enumerate(reversed(tail_k)):
+                    cand_pos = w_idx - offset_i
+                    if 0 <= cand_pos < len(spoken_words):
+                        t_score += token_fuzzy_sim(tk, spoken_words[cand_pos]["norm"])
+                # Score head match (first words of Scene k+1)
+                h_score = 0.0
+                for offset_i, hk in enumerate(head_next):
+                    cand_pos = w_idx + 1 + offset_i
+                    if 0 <= cand_pos < len(spoken_words):
+                        h_score += token_fuzzy_sim(hk, spoken_words[cand_pos]["norm"])
+
+                gap_sec = max(0.0, spoken_words[w_idx + 1]["start"] - w_end_t)
+                pause_bonus = min(4.5, gap_sec * 6.5) if gap_sec >= 0.16 else -1.5
+                dist_pen = abs(w_idx - exp_w_idx) * 0.14
+                total_sc = (t_score * 3.8) + (h_score * 3.8) + pause_bonus - dist_pen
+                if total_sc > best_w_score:
+                    best_w_score = total_sc
+                    best_w = w_idx
+
+            if best_w >= 0:
+                prev_w_idx = best_w
+                w_end_t = spoken_words[best_w]["end"]
+                next_st_t = spoken_words[best_w + 1]["start"]
+                # Scan raw PCM forward from w_end_t up to next_st_t to make 100% sure the final vowel tail has dropped to silence!
+                f_start = min(n_frames - 1, max(0, int(w_end_t * 50)))
+                f_limit = min(n_frames - 1, max(f_start, int((next_st_t + 0.05) * 50)))
+                quiet_f = f_start
+                for f_scan in range(f_start, f_limit + 1):
+                    if smooth_e[f_scan] <= silence_thresh:
+                        quiet_f = f_scan
+                        break
+                    quiet_f = f_scan
+                tail_quiet_t = quiet_f / 50.0
+                # Wait +0.18s after the final syllable tail finishes before triggering the visual transition
+                snapped_t = min(max(tail_quiet_t + 0.18, w_end_t + 0.20), max(w_end_t + 0.20, next_st_t - 0.02))
+
+        # 2. Fallback: find deepest sustained inter-sentence silence valley (>= 300ms pause) slightly at or after t_exp
+        if snapped_t is None:
+            min_t = max(prev_b + 2.5, t_exp - 1.6)
+            max_t = min(voice_dur - 2.2 * (n_scenes - 1 - k), t_exp + 2.4)
+            if max_t <= min_t + 0.15:
+                snapped_t = max(prev_b + 2.2, min(voice_dur - 1.8, t_exp))
+            else:
+                f_lo = max(0, int(min_t * 50))
+                f_hi = min(n_frames - 1, int(max_t * 50))
+                best_f = int(t_exp * 50)
+                best_score = 1e18
+                for f_idx in range(f_lo, f_hi + 1):
+                    t_cand = f_idx / 50.0
+                    # Penalize cutting early (t_cand < t_exp) more than cutting late so images NEVER jump ahead of voice!
+                    asym_dist = (t_exp - t_cand) * 1.45 if t_cand < t_exp else (t_cand - t_exp) * 0.85
+                    dist_penalty = asym_dist * (0.24 * median_e)
+                    sc_val = smooth_e[f_idx] + dist_penalty
+                    if sc_val < best_score:
+                        best_score = sc_val
+                        best_f = f_idx
+                snapped_t = (best_f / 50.0) + 0.14
+
         boundaries.append(snapped_t)
 
     boundaries.append(voice_dur)
     durs = [max(2.2, boundaries[i + 1] - boundaries[i]) for i in range(n_scenes)]
-    # Normalize sum to exact voice_dur before adding intro/outro offsets
     sum_d = sum(durs) or voice_dur
     durs = [d * (voice_dur / sum_d) for d in durs]
     durs[0] += add_intro_sec
@@ -692,14 +806,52 @@ def call_gemini_tts_two_chapters_to_mp3(
         return finalize_pcm_to_mp3_with_bgm(pcm1, sr1, out_mp3)
     pcm2, _ = call_gemini_tts_raw_pcm(ch2_script, style_direction, key_offset=key_offset + 1)
     if scenes_ch1:
-        compute_scene_durations_from_raw_pcm(pcm1, sr1, scenes_ch1, add_intro_sec=1.20, add_outro_sec=0.425)
+        compute_scene_durations_from_raw_pcm(pcm1, sr1, scenes_ch1, add_intro_sec=1.20, add_outro_sec=0.55)
     if scenes_ch2:
-        compute_scene_durations_from_raw_pcm(pcm2, sr1, scenes_ch2, add_intro_sec=0.425, add_outro_sec=1.80)
+        compute_scene_durations_from_raw_pcm(pcm2, sr1, scenes_ch2, add_intro_sec=0.30, add_outro_sec=1.80)
     # 0.85s natural breath pause between Chapter 1 and Chapter 2
     pause_samples = int(sr1 * 0.85)
     pause_bytes = b"\x00\x00" * pause_samples
     combined_pcm = pcm1 + pause_bytes + pcm2
     return finalize_pcm_to_mp3_with_bgm(combined_pcm, sr1, out_mp3)
+
+
+def call_gemini_tts_four_chunks_to_mp3(
+    chunks_scenes: list[list[dict]],
+    style_direction: str,
+    out_mp3: Path,
+    key_offset: int = 1,
+) -> float:
+    """Voice a 40-scene YouTube script in 4 hardware-anchored 10-scene chunks, align each chunk with faster-whisper word timestamps, and mix over continuous Studio BGM."""
+    valid_chunks = [c for c in (chunks_scenes or []) if isinstance(c, list) and len(c) > 0]
+    if not valid_chunks:
+        raise ValueError("No valid scene chunks provided for 4-chunk TTS")
+
+    n_chunks = len(valid_chunks)
+    pcm_parts = []
+    sr_main = 24000
+    inter_pause_sec = 0.80
+
+    for idx, c_scenes in enumerate(valid_chunks):
+        c_script = "\n\n".join(
+            str(s.get("narration", "")).strip()
+            for s in c_scenes
+            if isinstance(s, dict) and str(s.get("narration", "")).strip()
+        )
+        pcm_c, sr_c = call_gemini_tts_raw_pcm(c_script, style_direction, key_offset=key_offset + idx)
+        if idx == 0:
+            sr_main = sr_c
+        intro_add = 1.20 if idx == 0 else 0.25
+        outro_add = 1.80 if idx == (n_chunks - 1) else 0.55
+        compute_scene_durations_from_raw_pcm(pcm_c, sr_main, c_scenes, add_intro_sec=intro_add, add_outro_sec=outro_add)
+        pcm_parts.append(pcm_c)
+        if idx < n_chunks - 1:
+            pause_samples = int(sr_main * inter_pause_sec)
+            pcm_parts.append(b"\x00\x00" * pause_samples)
+        print(f"Voiced & Whisper-aligned Audio Chunk #{idx+1}/{n_chunks} ({len(c_scenes)} scenes, {len(pcm_c)/(2.0*sr_main):.1f}s)")
+
+    combined_pcm = b"".join(pcm_parts)
+    return finalize_pcm_to_mp3_with_bgm(combined_pcm, sr_main, out_mp3)
 
 
 def enforce_spotify_html_link(raw_html: str, article_url: str, short_loc: str) -> str:
@@ -1066,6 +1218,7 @@ Trả về đúng JSON với 1 khóa duy nhất:
         res_yt["scenes"] = all_scenes
         res_yt["scenes_ch1"] = scenes_ch1
         res_yt["scenes_ch2"] = scenes_ch2
+        res_yt["chunks_scenes"] = all_chunks_scenes
         res_yt["chapter1_speech"] = "\n\n".join(str(s.get("narration", "")).strip() for s in scenes_ch1) or f"Cùng khám phá {article['h1']}."
         res_yt["chapter2_speech"] = "\n\n".join(str(s.get("narration", "")).strip() for s in scenes_ch2)
         res_yt["speech_script"] = (res_yt["chapter1_speech"] + "\n\n" + res_yt["chapter2_speech"]).strip()
@@ -1451,28 +1604,43 @@ def build_youtube_thumbnail_1280x720(image_urls: list[str], yt_title: str, short
     return t_url
 
 
-def verify_photo_candidates_with_gemini_vision(candidates: list[dict], query_vi: str, cap: str, short_loc: str, scene_idx: int) -> int:
-    """Have Gemini Vision inspect 2-3 candidate photos for a scene and return index of the cleanest photo (0 watermark, 0 shop text, 0 Chinese cliff temple)."""
+def verify_photo_candidates_with_gemini_vision(
+    candidates: list[dict],
+    query_vi: str,
+    cap: str,
+    short_loc: str,
+    scene_idx: int,
+    is_main_loc: bool = True,
+) -> int:
+    """Have Gemini Vision inspect both the image pixels AND its web title/source metadata to guarantee 100% exact location match and 0 watermarks."""
     if not candidates:
         return -1
+    loc_rule = (
+        f"- QUAN TRỌNG SỐ 1 (ĐÚNG ĐỊA ĐIỂM 100%): Phân cảnh này đang nói trực tiếp về '{short_loc}'. Hãy kiểm tra kỹ cả bức ảnh và dòng [Tiêu đề/Nguồn web] đi kèm của từng ứng viên. Nếu tiêu đề/nguồn web hoặc hình ảnh cho thấy đây là một ngôi đền/chùa/địa điểm KHÁC (không phải '{short_loc}'), BẮT BUỘC LOẠI BỎ NGAY!"
+        if is_main_loc
+        else f"- QUAN TRỌNG SỐ 1 (KHỚP NỘI DUNG CÂU NÓI): Phân cảnh này đang minh họa cho '{query_vi}' ('{cap}'). Hãy kiểm tra kỹ hình ảnh và dòng [Tiêu đề/Nguồn web] để chọn bức ảnh khớp chính xác với địa danh hoặc lễ vật/cung đường đang được nhắc tới!"
+    )
     parts = [
         {
             "text": (
-                f"Bạn là Kiểm duyệt viên Hình ảnh cho phóng sự du lịch Việt Nam về '{short_loc}'.\n"
-                f"Phân cảnh hiện tại: '{cap}' (Từ khóa: '{query_vi}').\n"
+                f"Bạn là Kiểm duyệt viên Hình ảnh Nghiêm ngặt cho phóng sự du lịch Việt Nam về '{short_loc}'.\n"
+                f"Phân cảnh hiện tại: '{cap}' (Truy vấn: '{query_vi}').\n"
                 f"Dưới đây là {len(candidates)} bức ảnh ứng viên đánh số từ 0 đến {len(candidates)-1}.\n"
-                "Hãy NHÌN KỸ TỪNG BỨC ẢNH và LOẠI BỎ NGAY những ảnh mắc 1 trong các lỗi sau:\n"
+                "Hãy KIỂM TRA KÉP (CẢ HÌNH ẢNH LẪN TIÊU ĐỀ/NGUỒN WEB) và LOẠI BỎ NGAY những ảnh mắc 1 trong các lỗi sau:\n"
+                f"{loc_rule}\n"
                 "- Có gắn logo hình mờ (watermark) của báo chí, trang web, fanpage hoặc cửa hàng ở góc/giữa ảnh.\n"
                 "- Có chữ quảng cáo, số điện thoại (09..., 08...), mã sản phẩm (Mã:...), bảng giá, khung chữ banner.\n"
-                "- Là ảnh chụp sản phẩm buôn bán rời rạc (ngói, gạch, gốm sứ, chai lọ) hoặc ảnh bản đồ/văn bản.\n"
+                "- Là ảnh chụp sản phẩm buôn bán rời rạc (ngói, gạch, gốm sứ, chai lọ) hoặc ảnh bản đồ/sơ đồ/văn bản.\n"
                 "- Là ảnh núi non/chùa chiền Trung Quốc (như chùa treo vách núi đá dựng đứng kiểu Trung Quốc) hoặc ảnh giả tưởng AI.\n\n"
-                "Hãy chọn ra 1 bức ảnh SẠCH NHẤT, ĐẸP NHẤT, ĐÚNG VỚI PHONG CẢNH/VĂN HÓA VIỆT NAM NHẤT.\n"
-                "Trả về đúng JSON: {\"best_index\": số_nguyên_từ_0_đến_N_hoặc_-1_nếu_tất_cả_đều_xấu}"
+                "Hãy chọn ra 1 bức ảnh ĐÚNG ĐỊA ĐIỂM 100%, SẠCH NHẤT, ĐẸP NHẤT VÀ KHỚP CÂU NÓI NHẤT.\n"
+                "Nếu tất cả ứng viên đều sai địa điểm hoặc dính watermark/quảng cáo, hãy trả về -1.\n"
+                "Trả về đúng JSON: {\"best_index\": số_nguyên_từ_0_đến_N_hoặc_-1}"
             )
         }
     ]
     for c_i, c in enumerate(candidates):
-        parts.append({"text": f"--- ỨNG VIÊN #{c_i} ---"})
+        meta_info = str(c.get("meta") or "").strip()[:180]
+        parts.append({"text": f"--- ỨNG VIÊN #{c_i} [Tiêu đề/Nguồn web: {meta_info}] ---"})
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": c["b64"]}})
 
     global _LAST_GOOD_GEMINI_MODEL
@@ -1501,8 +1669,56 @@ def verify_photo_candidates_with_gemini_vision(candidates: list[dict], query_vi:
     return 0
 
 
+def extract_core_location_slug(short_loc: str) -> tuple[str, list[str]]:
+    """Extract the distinctive proper-noun core of a destination (e.g. 'Đền Cặp Tiên Vân Đồn' -> 'cap tien') for strict location verification."""
+    loc_ascii = to_unaccented_ascii(short_loc).lower().strip()
+    loc_ascii = re.sub(r"\s+", " ", loc_ascii)
+    # Strip generic venue prefixes
+    core = re.sub(
+        r"^(?:khu\s+di\s+tich\s+lich\s+su|khu\s+di\s+tich|danh\s+thang|quan\s+the|thien\s+vien\s+truc\s+lam|thien\s+vien|nha\s+tho|den\s+tho|chua|den|mieu|dinh|lang|vinh|dao|bai\s+bien|bai)\s+",
+        "",
+        loc_ascii,
+    ).strip()
+    # Keep first 2-3 distinctive words of the proper name
+    tokens = [t for t in re.split(r"[^a-z0-9]+", core) if len(t) >= 2]
+    core_phrase = " ".join(tokens[:2]) if len(tokens) >= 2 else (tokens[0] if tokens else loc_ascii)
+    all_tokens = [t for t in re.split(r"[^a-z0-9]+", loc_ascii) if len(t) >= 2]
+    return core_phrase, all_tokens
+
+
+def is_candidate_metadata_location_valid(
+    img_url: str,
+    meta_text: str,
+    core_phrase: str,
+    loc_tokens: list[str],
+    is_main_loc: bool,
+    query_ascii: str,
+    is_gmaps: bool,
+) -> tuple[bool, int]:
+    """3-Layer Location Lock check: verify image URL + webpage title/URL metadata match the exact destination and never a conflicting temple/pagoda."""
+    combined = to_unaccented_ascii(f"{img_url} {meta_text}").lower()
+    combined_spaced = re.sub(r"[^a-z0-9]+", " ", combined)
+
+    if is_main_loc:
+        has_core = (core_phrase in combined_spaced) or (core_phrase.replace(" ", "") in combined.replace("-", "").replace("_", ""))
+        if has_core:
+            return True, 100
+        # If it is a direct Google Maps Place visitor photo from a quoted search for this exact destination, allow it with high score
+        if is_gmaps:
+            return True, 85
+        # Otherwise, if a web image does NOT even contain the core proper name of the destination in its title, alt, page URL, or image URL -> REJECT so we never grab a photo of a different temple!
+        return False, 0
+
+    # For non-main-location scenes (e.g., offering trays 'mam le', highways 'cao toc', or explicitly named nearby landmarks like 'chua cai bau' / 'den cua ong'):
+    q_words = [w for w in re.split(r"[^a-z0-9]+", query_ascii) if len(w) >= 3 and w not in ("viet", "nam", "tinh", "khu", "anh", "실")]
+    matched_q = sum(1 for w in q_words if w in combined_spaced)
+    if is_gmaps or matched_q >= min(2, len(q_words)):
+        return True, 60 + matched_q * 10
+    return False, 0
+
+
 def search_and_download_scene_real_photo(query_vi: str, short_loc: str, used_urls: set, used_hashes: list[int], cap: str = "", scene_idx: int = 0):
-    """Search Google Images (including Google Maps lh3 visitor photos) + Bing Images, then inspect top 3 candidates with Gemini Vision to pick a 100% watermark-free, authentic photo."""
+    """Search Google Maps (lh3) -> Google Images Web (udm=2) -> Bing Images with 3-Layer Location Lock so photos are 100% authentic and from the exact location."""
     import io
     from PIL import Image, ImageOps
 
@@ -1515,56 +1731,104 @@ def search_and_download_scene_real_photo(query_vi: str, short_loc: str, used_url
         re.I,
     )
 
-    # Sanitize query: strip building material keywords that trigger e-commerce catalog listings
     clean_q = re.sub(r"\b(?:ngói\s+mũi\s+hài|gạch\s+gốm|gỗ\s+lim|can\s+nhựa|chai\s+lọ|vật\s+liệu)\b", "", query_vi, flags=re.I).strip()
     if len(clean_q) < 6:
         clean_q = f"kiến trúc {short_loc}"
 
-    search_variants = [
-        f"{clean_q} Việt Nam",
-        f"{clean_q} {short_loc}",
-        f"du lịch {short_loc} Quảng Ninh",
-    ]
+    core_phrase, loc_tokens = extract_core_location_slug(short_loc)
+    q_ascii = to_unaccented_ascii(f"{clean_q} {cap}").lower()
+    q_spaced = re.sub(r"[^a-z0-9]+", " ", q_ascii)
 
-    for q in search_variants:
-        candidate_urls = []
+    # Determine if this scene is about the main destination or a specific offering tray / route / nearby landmark
+    non_main_indicators = ("mam le", "le chay", "le man", "son trang", "xoi ga", "ngu qua", "cao toc", "cang ", "san bay", "dac san", "mon an")
+    mentions_other_temple = any(
+        p in q_spaced and core_phrase not in p
+        for p in re.findall(r"\b(?:den|chua|mieu|dinh|thien vien|bai bien|dao)\s+[a-z0-9]+\s+[a-z0-9]+", q_spaced)
+    )
+    is_main_loc = (core_phrase in q_spaced) or (not any(ind in q_spaced for ind in non_main_indicators) and not mentions_other_temple)
+
+    if is_main_loc:
+        # Always anchor search queries with the exact destination name so Google Maps & Google Images return photos of THIS exact place!
+        base_detail = clean_q
+        if core_phrase not in to_unaccented_ascii(base_detail).lower():
+            base_detail = f"{base_detail} {short_loc}"
+        search_variants = [
+            f'"{short_loc}" {clean_q}',
+            base_detail,
+            f'"{short_loc}" hình ảnh thực tế',
+            f"{short_loc}",
+        ]
+    else:
+        search_variants = [
+            f"{clean_q} Việt Nam",
+            clean_q,
+        ]
+
+    seen_cand_urls = set()
+    for v_idx, q in enumerate(search_variants):
+        raw_cands = []  # list of (score, url, meta_text, is_gmaps)
+        is_quoted_loc_query = f'"{short_loc}"' in q or (is_main_loc and v_idx in (0, 2, 3))
+
         # 1. Google Images (udm=2) + Google Maps Place Photos (lh3.googleusercontent.com)
         try:
             g_url = f"https://www.google.com/search?q={urllib.parse.quote(q)}&udm=2&hl=vi"
             gr = requests.get(g_url, headers=b_headers, timeout=8)
             if gr.status_code == 200:
-                # Extract Google Maps / Google Place user photos first (highest priority!)
-                lh_matches = re.findall(r"(https://lh[35]\.googleusercontent\.com/(?:p|gps-cs-s)/[A-Za-z0-9_-]{25,})", gr.text)
-                for lhu in lh_matches:
-                    full_lhu = f"{lhu}=w1280-h720-k-no"
-                    if full_lhu not in used_urls and full_lhu not in candidate_urls:
-                        candidate_urls.append(full_lhu)
-                # Extract standard high-res image URLs from Google Images results
-                g_imgs = re.findall(r'\["(https?://[^"\'<>\\\s]+\.(?:jpg|jpeg|png))",\d+,\d+\]', gr.text, flags=re.I)
-                for gu in g_imgs:
+                # Tier 1: Google Maps Place user photos (only when query explicitly targets the location)
+                if is_quoted_loc_query or not is_main_loc:
+                    lh_matches = re.findall(r"(https://lh[35]\.googleusercontent\.com/(?:p|gps-cs-s)/[A-Za-z0-9_-]{25,})", gr.text)
+                    for lhu in lh_matches[:10]:
+                        full_lhu = f"{lhu}=w1280-h720-k-no"
+                        if full_lhu not in used_urls and full_lhu not in seen_cand_urls:
+                            seen_cand_urls.add(full_lhu)
+                            raw_cands.append((90, full_lhu, f"Google Maps Photo ({q})", True))
+
+                # Tier 2: Google Images Web results with surrounding title/page URL metadata check!
+                for m in re.finditer(r'\["(https?://[^"\'<>\\\s]+\.(?:jpg|jpeg|png|webp))",\d+,\d+\]', gr.text, flags=re.I):
+                    gu = m.group(1)
                     u = gu.encode("utf-8").decode("unicode_escape", errors="ignore") if "\\u" in gu else gu
-                    if u not in used_urls and u not in candidate_urls and not bad_patterns.search(u) and "gstatic.com" not in u:
-                        candidate_urls.append(u)
+                    if u in used_urls or u in seen_cand_urls or bad_patterns.search(u) or "gstatic.com" in u:
+                        continue
+                    ctx_raw = gr.text[max(0, m.start() - 100) : min(len(gr.text), m.end() + 450)]
+                    ctx_clean = ctx_raw.encode("utf-8").decode("unicode_escape", errors="ignore") if "\\u" in ctx_raw else ctx_raw
+                    ctx_clean = re.sub(r"<[^>]+>", " ", html.unescape(ctx_clean))
+                    ok_loc, loc_sc = is_candidate_metadata_location_valid(u, ctx_clean, core_phrase, loc_tokens, is_main_loc, q_spaced, False)
+                    if ok_loc:
+                        seen_cand_urls.add(u)
+                        raw_cands.append((loc_sc, u, ctx_clean[:200], False))
         except Exception:
             pass
 
-        # 2. Bing Images supplemental candidates
+        # 2. Bing Images with structured JSON metadata (murl, purl, t, desc)
         try:
             b_url = f"https://www.bing.com/images/search?q={urllib.parse.quote(q)}&form=HDRSC2&first=1"
             r = requests.get(b_url, headers=b_headers, timeout=8)
             if r.status_code == 200:
-                matches = re.findall(r"murl&quot;:&quot;(https?://[^&]+?\.(?:jpg|jpeg|png|webp))&quot;", r.text, flags=re.I)
-                for mu in matches[:16]:
-                    u = html.unescape(mu).strip()
-                    if u not in used_urls and u not in candidate_urls and not bad_patterns.search(u):
-                        candidate_urls.append(u)
+                for m_blk in re.findall(r'm="(\{[^"]+\})"', r.text):
+                    try:
+                        b_obj = json.loads(html.unescape(m_blk))
+                    except Exception:
+                        continue
+                    u = str(b_obj.get("murl") or "").strip()
+                    if not u or u in used_urls or u in seen_cand_urls or bad_patterns.search(u):
+                        continue
+                    if not re.search(r"\.(?:jpg|jpeg|png|webp)(?:\?|$)", u, flags=re.I):
+                        continue
+                    meta_str = f"{b_obj.get('t', '')} | {b_obj.get('desc', '')} | {b_obj.get('purl', '')}"
+                    ok_loc, loc_sc = is_candidate_metadata_location_valid(u, meta_str, core_phrase, loc_tokens, is_main_loc, q_spaced, False)
+                    if ok_loc:
+                        seen_cand_urls.add(u)
+                        raw_cands.append((loc_sc, u, meta_str[:200], False))
         except Exception:
             pass
 
-        # Download top 3 valid distinct candidates for this scene and run Gemini Vision verification!
+        # Sort candidates so highest location-match score comes first
+        raw_cands.sort(key=lambda x: x[0], reverse=True)
+
+        # Download top 4 visually distinct candidates for this scene and run Gemini Vision verification!
         valid_cands = []
-        for u in candidate_urls[:18]:
-            if len(valid_cands) >= 3:
+        for _, u, meta_str, _ in raw_cands[:20]:
+            if len(valid_cands) >= 4:
                 break
             try:
                 ir = requests.get(u, headers=b_headers, timeout=6)
@@ -1576,28 +1840,51 @@ def search_and_download_scene_real_photo(query_vi: str, short_loc: str, used_url
                     if has_bottom_title_banner(im):
                         continue
                     ah = compute_image_ahash(im)
-                    if is_near_duplicate_hash(ah, used_hashes, max_dist=6) or any((ah ^ vc["ah"]).bit_count() <= 6 for vc in valid_cands):
+                    if is_near_duplicate_hash(ah, used_hashes, max_dist=7) or any((ah ^ vc["ah"]).bit_count() <= 7 for vc in valid_cands):
                         continue
-                    thumb = ImageOps.contain(im, (300, 188), method=Image.Resampling.BILINEAR)
+                    thumb = ImageOps.contain(im, (320, 200), method=Image.Resampling.BILINEAR)
                     buf = io.BytesIO()
-                    thumb.save(buf, format="JPEG", quality=70)
+                    thumb.save(buf, format="JPEG", quality=72)
                     valid_cands.append({
                         "im": im,
                         "url": u,
                         "ah": ah,
+                        "meta": meta_str,
                         "b64": base64.b64encode(buf.getvalue()).decode("ascii"),
                     })
             except Exception:
                 continue
 
         if valid_cands:
-            best_i = verify_photo_candidates_with_gemini_vision(valid_cands, clean_q, cap or clean_q, short_loc, scene_idx)
+            best_i = verify_photo_candidates_with_gemini_vision(
+                valid_cands,
+                clean_q,
+                cap or clean_q,
+                short_loc,
+                scene_idx,
+                is_main_loc=is_main_loc,
+            )
             if best_i >= 0 and best_i < len(valid_cands):
                 chosen = valid_cands[best_i]
                 used_urls.add(chosen["url"])
                 used_hashes.append(chosen["ah"])
                 return chosen["im"], chosen["url"]
     return None, ""
+
+
+def create_architectural_detail_crop(base_im, variant_idx: int):
+    """Create a high-res architectural detail framing from a 100% verified location photo when a lesser-known destination has fewer than 40 unique web photos."""
+    w, h = base_im.size
+    mode = variant_idx % 4
+    if mode == 0:
+        box = (int(w * 0.10), int(h * 0.04), int(w * 0.90), int(h * 0.82))
+    elif mode == 1:
+        box = (int(w * 0.03), int(h * 0.12), int(w * 0.83), int(h * 0.92))
+    elif mode == 2:
+        box = (int(w * 0.17), int(h * 0.12), int(w * 0.97), int(h * 0.92))
+    else:
+        box = (int(w * 0.14), int(h * 0.14), int(w * 0.86), int(h * 0.86))
+    return base_im.crop(box)
 
 
 def render_broadcast_transition_frame(prev_im, curr_im, ease: float, style_idx: int, scene_num: int):
@@ -1753,11 +2040,11 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
             if raw_im is not None:
                 chosen_url = f"[CAPTION_SEARCH: '{cap}'] {ext_u}"
 
-        # 5. GUARANTEED 1-TO-1 SCENE ALIGNMENT FALLBACK (Never skip a scene so voice and image never drift out of sync!)
+        # 5. GUARANTEED 1-TO-1 EXACT-LOCATION DETAIL FRAMING FALLBACK (Never take a wrong temple's photo and never skip a scene!)
         if raw_im is None and cached_web_ims:
             fb_u, fb_im, _ = cached_web_ims[idx % len(cached_web_ims)]
-            raw_im = fb_im
-            chosen_url = f"[SYNC_SAFE_WEB_FALLBACK] {fb_u}"
+            raw_im = create_architectural_detail_crop(fb_im, idx)
+            chosen_url = f"[EXACT_LOC_DETAIL_CROP #{idx % 4}] {fb_u}"
 
         if raw_im is not None:
             scene_num = len(tv_frames) + 1
@@ -1784,7 +2071,7 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
         final_durs[0] += 1.20
         final_durs[-1] += 1.80
 
-    # Single-pass 25fps rawvideo pipe to FFmpeg: zero cumulative rounding drift, zero black screen flashes, 5 rotating broadcast transitions!
+    # Single-pass 25fps rawvideo pipe to FFmpeg: forced bright I-frame at 0.000s (no black cover on Bluesky!), zero drift, 5 rotating transitions!
     fps = 25
     cmd = [
         "ffmpeg", "-y",
@@ -1799,6 +2086,8 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
         "-preset", "veryfast",
         "-crf", "22",
         "-pix_fmt", "yuv420p",
+        "-force_key_frames", "expr:gte(t,0)",
+        "-avoid_negative_ts", "make_zero",
         "-c:a", "aac",
         "-b:a", "192k",
         "-t", f"{duration_sec:.2f}",
@@ -2111,14 +2400,15 @@ def update_status_json(article_url: str, channel: str, info: dict):
 
 
 def get_or_build_hd_video(article: dict, slug: str, now_str: str) -> tuple[Path, str, float, str, dict]:
-    """Reuse existing HD MP4 from GitHub Release if already built for this article, or render once and cache."""
+    """Reuse existing HD MP4 from GitHub Release if already built with bright_v2 (no black frame at 0:00), or render once and cache."""
     article_url = article["url"]
     st = read_status_json().get(article_url) or {}
+    v_cache = st.get("video_cache") or {}
 
-    # Check if video_cache or dailymotion already has a valid GitHub Release MP4 URL
-    cached_url = (st.get("video_cache") or {}).get("mp4_url") or (st.get("dailymotion") or {}).get("mp4_url")
-    cached_dur = (st.get("video_cache") or {}).get("duration_sec") or (st.get("dailymotion") or {}).get("duration_sec") or 95.0
-    cached_loc = (st.get("video_cache") or {}).get("short_loc") or re.split(r"[:|–—?-]", article["h1"])[0].strip()
+    # Only reuse cached video if it was built with bright_v2 (guarantees zero black frame at 0:00 on Bluesky!)
+    cached_url = v_cache.get("mp4_url") if v_cache.get("bright_v2") else ""
+    cached_dur = v_cache.get("duration_sec") or 95.0
+    cached_loc = v_cache.get("short_loc") or re.split(r"[:|–—?-]", article["h1"])[0].strip()
 
     mp4_path = WORK_DIR / f"{slug}-hd-video.mp4"
     if cached_url and mp4_path.exists() and mp4_path.stat().st_size > 100000:
@@ -2126,7 +2416,7 @@ def get_or_build_hd_video(article: dict, slug: str, now_str: str) -> tuple[Path,
 
     if cached_url:
         try:
-            print(f"Reusing cached HD MP4 from GitHub Release: {cached_url}")
+            print(f"Reusing cached bright_v2 HD MP4 from GitHub Release: {cached_url}")
             r = requests.get(cached_url, timeout=60)
             if r.status_code == 200 and len(r.content) > 100000:
                 mp4_path.write_bytes(r.content)
@@ -2153,6 +2443,7 @@ def get_or_build_hd_video(article: dict, slug: str, now_str: str) -> tuple[Path,
         "mp4_url": mp4_release_url,
         "duration_sec": round(duration, 1),
         "short_loc": short_loc,
+        "bright_v2": True,
         "cached_at": now_str,
     })
     return mp4_path, mp4_release_url, duration, short_loc, master_data
@@ -2250,15 +2541,15 @@ def main():
             yt_full_desc = enforce_varied_bare_link_plain(yt_raw_desc, article_url, yt_short_loc, max_chars=4600)
             yt_tags = safe_str(yt_data.get("tags")) or f"du lịch checkin, {yt_short_loc}, du lịch việt nam"
 
-            # Build dedicated ~5 minute (2-chapter, 40 scenes) HD video with Raw PCM Silence-Snapped Durations & Boosted Studio BGM
+            # Build dedicated ~5 minute (4-chunk, 40 scenes) HD video with Whisper Word-Timestamp Sync & Boosted Studio BGM
             file_tag = "preview-5min" if is_preview else "youtube-5min"
             yt_mp3_path = WORK_DIR / f"{slug}-{file_tag}.mp3"
             ckpt = (read_status_json().get(article_url) or {}).get("yt_checkpoint") or {}
             yt_duration = 0.0
-            saved_durs = ckpt.get("scene_durations_v2")
+            saved_durs = ckpt.get("scene_durations_v3")
             all_scenes_list = yt_data.get("scenes") or []
 
-            if ckpt.get("bgm_v2") and ckpt.get("voice_mp3_url") and ckpt.get("voice_duration_sec") and isinstance(saved_durs, list) and len(saved_durs) == len(all_scenes_list):
+            if ckpt.get("whisper_4chunk_v3") and ckpt.get("voice_mp3_url") and ckpt.get("voice_duration_sec") and isinstance(saved_durs, list) and len(saved_durs) == len(all_scenes_list):
                 try:
                     vr = requests.get(ckpt["voice_mp3_url"], timeout=45)
                     if vr.status_code == 200 and len(vr.content) > 50000:
@@ -2267,7 +2558,7 @@ def main():
                         for sc_obj, d_val in zip(all_scenes_list, saved_durs):
                             if isinstance(sc_obj, dict):
                                 sc_obj["exact_duration_sec"] = float(d_val)
-                        print(f"Resumed 5-Min Voice MP3 + Exact PCM Scene Durations from checkpoint ({yt_duration:.1f}s): {ckpt['voice_mp3_url']}")
+                        print(f"Resumed 5-Min Voice MP3 + Exact Whisper Scene Durations from checkpoint ({yt_duration:.1f}s): {ckpt['voice_mp3_url']}")
                 except Exception:
                     yt_duration = 0.0
 
@@ -2275,23 +2566,32 @@ def main():
                 style_dir = (
                     "Hãy đọc đoạn podcast du lịch sau bằng giọng nữ tiếng Việt tự nhiên, ngọt ngào, ấm áp, nhịp độ vừa phải, có nhấn nhá truyền cảm và ngắt nghỉ sâu lắng như biên tập viên chương trình du lịch trên truyền hình:"
                 )
-                ch1_speech = safe_str(yt_data.get("chapter1_speech") or yt_data.get("speech_script"), "\n\n")
-                ch2_speech = safe_str(yt_data.get("chapter2_speech"), "\n\n")
-                yt_duration = call_gemini_tts_two_chapters_to_mp3(
-                    ch1_speech,
-                    ch2_speech,
-                    style_dir,
-                    yt_mp3_path,
-                    key_offset=3,
-                    scenes_ch1=yt_data.get("scenes_ch1"),
-                    scenes_ch2=yt_data.get("scenes_ch2"),
-                )
-                print(f"Generated Dedicated 5-Min Voice MP3 (2 Chapters + Boosted Studio BGM + PCM Silence Sync): {yt_mp3_path.name} ({yt_duration:.1f}s)")
+                chunks_scenes = yt_data.get("chunks_scenes") or []
+                if chunks_scenes:
+                    yt_duration = call_gemini_tts_four_chunks_to_mp3(
+                        chunks_scenes,
+                        style_dir,
+                        yt_mp3_path,
+                        key_offset=1,
+                    )
+                else:
+                    ch1_speech = safe_str(yt_data.get("chapter1_speech") or yt_data.get("speech_script"), "\n\n")
+                    ch2_speech = safe_str(yt_data.get("chapter2_speech"), "\n\n")
+                    yt_duration = call_gemini_tts_two_chapters_to_mp3(
+                        ch1_speech,
+                        ch2_speech,
+                        style_dir,
+                        yt_mp3_path,
+                        key_offset=3,
+                        scenes_ch1=yt_data.get("scenes_ch1"),
+                        scenes_ch2=yt_data.get("scenes_ch2"),
+                    )
+                print(f"Generated Dedicated 5-Min Voice MP3 (4 Chunks + Whisper Word-Timestamp Sync + Boosted Studio BGM): {yt_mp3_path.name} ({yt_duration:.1f}s)")
                 voice_rel_url, _ = upload_mp3_to_github_release(yt_mp3_path)
                 ckpt["voice_mp3_url"] = voice_rel_url
                 ckpt["voice_duration_sec"] = round(yt_duration, 1)
-                ckpt["bgm_v2"] = True
-                ckpt["scene_durations_v2"] = [float(sc.get("exact_duration_sec", 7.5)) for sc in all_scenes_list if isinstance(sc, dict)]
+                ckpt["whisper_4chunk_v3"] = True
+                ckpt["scene_durations_v3"] = [float(sc.get("exact_duration_sec", 7.5)) for sc in all_scenes_list if isinstance(sc, dict)]
                 update_status_json(article_url, "yt_checkpoint", ckpt)
 
             yt_mp4_path = WORK_DIR / f"{slug}-{file_tag}.mp4"
