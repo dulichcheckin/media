@@ -2078,7 +2078,7 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
         final_durs[0] += 1.20
         final_durs[-1] += 1.80
 
-    # Single-pass 25fps rawvideo pipe to FFmpeg: forced bright I-frame at 0.000s (no black cover on Bluesky!), zero drift, 5 rotating transitions!
+    # Single-pass 25fps rawvideo pipe to FFmpeg: bright frame 0 at 0.000s (no black cover on Bluesky!), ~14MB compact size, zero drift, 5 rotating transitions!
     fps = 25
     cmd = [
         "ffmpeg", "-y",
@@ -2091,9 +2091,9 @@ def build_hd_video_from_images(image_urls: list[str], audio_mp3: Path, duration_
         "-i", str(audio_mp3),
         "-c:v", "libx264",
         "-preset", "veryfast",
+        "-tune", "stillimage",
         "-crf", "22",
         "-pix_fmt", "yuv420p",
-        "-force_key_frames", "expr:gte(t,0)",
         "-avoid_negative_ts", "make_zero",
         "-c:a", "aac",
         "-b:a", "192k",
