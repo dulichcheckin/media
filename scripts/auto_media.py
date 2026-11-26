@@ -861,21 +861,117 @@ def call_gemini_tts_four_chunks_to_mp3(
     return finalize_pcm_to_mp3_with_bgm(combined_pcm, sr_main, out_mp3)
 
 
+def has_vietnamese_accents(text: str) -> bool:
+    return bool(re.search(r"[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]", str(text or ""), re.I))
+
+
+def normalize_core_short_name(raw_loc: str) -> str:
+    """Extract clean 2-4 word accented core destination name (never return a long H1 title or unaccented slug)."""
+    s = re.split(r"\s*[:|–—?]\s*|\s+-\s+|,\s*", str(raw_loc or "").strip())[0].strip()
+    s = re.sub(
+        r"^(?:trọn bộ\s+|tổng hợp\s+|top\s+\d+\s+|chia sẻ\s+|bỏ túi\s+)?(?:kinh nghiệm\s+|cẩm nang\s+|hướng dẫn\s+|lịch trình\s+|review\s+|khám phá\s+|tham quan\s+|du lịch\s+|đi lễ\s+|đi\s+|về\s+|tìm hiểu\s+)+",
+        "",
+        s,
+        flags=re.I,
+    ).strip()
+    s = re.sub(
+        r"\s+(?:lịch sử|kiến trúc|kinh nghiệm|cẩm nang|hướng dẫn|sắm lễ|văn khấn|đi lễ|nổi tiếng|linh thiêng|địa chỉ|giá vé|giờ mở cửa|ở đâu|có gì|từ a-z|tự túc|chi tiết|mới nhất|\d{4})\b[\s\S]*$",
+        "",
+        s,
+        flags=re.I,
+    ).strip()
+    words = s.split()
+    if len(words) > 5:
+        s = " ".join(words[:4])
+    if not has_vietnamese_accents(s):
+        return ""
+    return re.sub(
+        r"^(Chùa|Đền|Miếu|Đình|Thiền Viện|Nhà Thờ|Khu Di Tích|Danh Thắng|Vịnh|Đảo|Bãi Biển|Hồ|Núi|Động|Hang)\b",
+        lambda m: m.group(1).lower(),
+        s,
+    )
+
+
+def build_seo_anchor_phrase(short_loc: str) -> str:
+    """70% Core Main Keyword (2-4 words) / 30% Natural Extended Keyword (5-7 words), 100% accented Vietnamese."""
+    core = normalize_core_short_name(short_loc)
+    if not core:
+        return "bài viết hướng dẫn chi tiết này"
+    if random.random() < 0.70:
+        return random.choice([core, core, core[0].upper() + core[1:]])
+    extended_pool = [
+        f"kinh nghiệm tham quan {core}",
+        f"kinh nghiệm đi {core}",
+        f"cẩm nang khám phá {core}",
+        f"lịch trình tham quan {core}",
+        f"kiến trúc và lịch sử {core}",
+        f"những lưu ý khi đi {core}",
+        f"hướng dẫn tham quan {core}",
+        f"khám phá không gian {core}",
+    ]
+    return random.choice(extended_pool)
+
+
+def build_diverse_bare_link_line(article_url: str, short_loc: str, is_short: bool = False) -> str:
+    """20+ diverse bare-link presentation styles without repetitive 'về [Title] tại:' patterns."""
+    core = normalize_core_short_name(short_loc)
+    if is_short:
+        short_pool = [
+            article_url,
+            f"Bài viết chi tiết: {article_url}",
+            f"Xem đầy đủ hơn ở {article_url}",
+            f"Lịch trình và lưu ý chi tiết — {article_url}",
+            f"Tham khảo trọn bộ kinh nghiệm thực tế: {article_url}",
+            f"Nguồn bài viết: {article_url}",
+            f"Đọc tiếp hướng dẫn đầy đủ ở {article_url}",
+            f"Thông tin chi tiết cho chuyến đi tại: {article_url}",
+        ]
+        if core and random.random() < 0.35:
+            return random.choice([
+                f"Cẩm nang đi {core} chi tiết — {article_url}",
+                f"Kinh nghiệm tham quan {core} từ A-Z: {article_url}",
+                f"Xem thêm lưu ý khi ghé {core} ở {article_url}",
+            ])
+        return random.choice(short_pool)
+
+    general_pool = [
+        f"Bạn có thể đọc trọn bộ bài viết hướng dẫn chi tiết qua đường dẫn {article_url}",
+        f"Trọn bộ kinh nghiệm di chuyển, giờ mở cửa và các lưu ý quan trọng đã được tổng hợp đầy đủ trong bài {article_url}",
+        f"Nếu đang lên kế hoạch cho chuyến đi, bạn có thể tham khảo thêm bài viết đầy đủ ở {article_url}",
+        f"Thông tin chi tiết về lịch trình và kinh nghiệm thực tế — {article_url}",
+        f"Bài viết cẩm nang đầy đủ trên Du Lịch Checkin: {article_url}",
+        f"Đọc tiếp toàn bộ hướng dẫn và những lưu ý cần biết ở {article_url}",
+        f"Xem thêm thông tin chi tiết và kinh nghiệm thực tế tại: {article_url}",
+        f"Nguồn bài viết gốc đầy đủ thông tin: {article_url}",
+        f"Mọi thông tin cần thiết cho hành trình khám phá đều có trong bài viết {article_url}",
+        f"Tham khảo trọn bộ cẩm nang thực tế cho chuyến đi tại: {article_url}",
+        article_url,
+    ]
+    if core and random.random() < 0.38:
+        return random.choice([
+            f"Kinh nghiệm tham quan {core} thực tế từ A đến Z cho người đi lần đầu — {article_url}",
+            f"Bạn nào sắp ghé thăm {core} có thể xem trọn bộ hướng dẫn chi tiết ở {article_url}",
+            f"Tổng hợp đầy đủ lịch trình và lưu ý quan trọng khi đi {core}: {article_url}",
+            f"Tìm hiểu kỹ hơn về không gian và kinh nghiệm đi {core} trong bài viết {article_url}",
+            f"Cẩm nang khám phá {core} chi tiết xem thêm tại: {article_url}",
+        ])
+    return random.choice(general_pool)
+
+
 def enforce_spotify_html_link(raw_html: str, article_url: str, short_loc: str) -> str:
-    """Clean semantic HTML for Spotify (<p>, <h2>, <h3>, <ul>, <li>, <a>) with 70% Anchor / 30% Bare Link at varied position."""
+    """Clean semantic HTML for Spotify & Archive.org with 70% Anchor (70/30 core vs long-tail) / 30% Diverse Bare Link."""
     s = re.sub(r"```(?:html)?", "", raw_html or "", flags=re.I).strip()
-    # Strip any pre-existing links to avoid duplicates
     s = re.sub(r"<a\b[^>]*>([\s\S]*?)</a>", r"\1", s, flags=re.I)
     s = re.sub(re.escape(article_url), "", s, flags=re.I)
 
-    # Split into paragraphs if plain text was returned
     if "<p" not in s.lower():
         paras = [f"<p>{html.escape(p.strip())}</p>" for p in re.split(r"\n\s*\n", s) if p.strip()]
     else:
         paras = [p.strip() + "</p>" for p in re.split(r"</p>", s, flags=re.I) if p.strip()]
 
+    core_loc = normalize_core_short_name(short_loc) or short_loc
     if not paras:
-        paras = [f"<p>{html.escape(short_loc)}</p>"]
+        paras = [f"<p>{html.escape(core_loc)}</p>"]
 
     use_anchor = (random.random() < 0.70)
     r_pos = random.random()
@@ -884,25 +980,26 @@ def enforce_spotify_html_link(raw_html: str, article_url: str, short_loc: str) -
     else:
         target_idx = 0
 
-    lead_templates = [
-        f"Bạn có thể tham khảo chi tiết lịch trình và kinh nghiệm thực tế tại {short_loc}",
-        f"Xem đầy đủ thông tin hướng dẫn tham quan {short_loc}",
-        f"Chi tiết các lưu ý đi lại và trải nghiệm tại {short_loc} được tổng hợp đầy đủ",
-    ]
-    lead = random.choice(lead_templates)
-
     if use_anchor:
-        # Try replacing first occurrence of short_loc in target paragraph with anchor tag
+        anchor_phrase = build_seo_anchor_phrase(short_loc)
         p_html = paras[target_idx]
-        pattern = re.compile(re.escape(short_loc), re.I)
+        pattern = re.compile(re.escape(anchor_phrase), re.I)
         if pattern.search(p_html):
-            paras[target_idx] = pattern.sub(f'<a href="{article_url}">{short_loc}</a>', p_html, count=1)
+            paras[target_idx] = pattern.sub(f'<a href="{article_url}">{anchor_phrase}</a>', p_html, count=1)
+        elif core_loc and re.search(re.escape(core_loc), p_html, re.I) and len(anchor_phrase.split()) <= 4:
+            paras[target_idx] = re.sub(re.escape(core_loc), f'<a href="{article_url}">{anchor_phrase}</a>', p_html, count=1, flags=re.I)
         else:
-            anchor_tag = f'<a href="{article_url}">{short_loc}</a>'
-            anchor_sentence = " " + lead.replace(short_loc, anchor_tag) + "."
-            paras[target_idx] = re.sub(r"</p>\s*$", anchor_sentence + "</p>", p_html, flags=re.I)
+            anchor_tag = f'<a href="{article_url}">{anchor_phrase}</a>'
+            anchor_sentences = [
+                f" Bạn có thể tham khảo chi tiết về {anchor_tag} để chuẩn bị chu đáo nhất cho chuyến đi.",
+                f" Thông tin đầy đủ hơn về {anchor_tag} sẽ giúp bạn chủ động sắp xếp lịch trình hợp lý.",
+                f" Đừng quên xem thêm {anchor_tag} trước khi khởi hành.",
+            ]
+            paras[target_idx] = re.sub(r"</p>\s*$", random.choice(anchor_sentences) + "</p>", p_html, flags=re.I)
     else:
-        bare_p = f'<p>{lead}: <a href="{article_url}">{article_url}</a></p>'
+        bare_line = build_diverse_bare_link_line(article_url, short_loc, is_short=False)
+        bare_html = bare_line.replace(article_url, f'<a href="{article_url}">{article_url}</a>')
+        bare_p = f"<p>{bare_html}</p>"
         paras.insert(min(len(paras), target_idx + 1), bare_p)
 
     full_html = "\n".join(paras)
@@ -910,19 +1007,14 @@ def enforce_spotify_html_link(raw_html: str, article_url: str, short_loc: str) -
 
 
 def enforce_varied_bare_link_plain(raw_text: str, article_url: str, short_loc: str, max_chars: int = 3800) -> str:
-    """Clean plain text with 100% standalone bare link placed naturally at top (after P1), middle, or bottom."""
+    """Clean plain text with diverse standalone bare link placed naturally at top (after P1), middle, or bottom."""
     s = re.sub(r"<[^>]+>", " ", raw_text or "")
     s = s.replace(article_url, "").strip()
     paras = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n\s*\n", s) if p.strip()]
     if not paras:
-        paras = [short_loc]
+        paras = [normalize_core_short_name(short_loc) or short_loc]
 
-    leads = [
-        f"Xem đầy đủ cẩm nang và lưu ý thực tế khi ghé thăm {short_loc} tại: {article_url}",
-        f"Chi tiết kinh nghiệm di chuyển, giờ mở cửa và lịch trình khám phá {short_loc} xem tại: {article_url}",
-        f"Tham khảo bài viết hướng dẫn chi tiết về {short_loc} tại: {article_url}",
-    ]
-    link_line = random.choice(leads)
+    link_line = build_diverse_bare_link_line(article_url, short_loc, is_short=False)
 
     # Budget characters for body paragraphs so link_line is never truncated
     budget = max_chars - len(link_line) - 10
@@ -2261,29 +2353,37 @@ def upload_to_bluesky(mp4_path: Path, title: str, post_text: str, article_url: s
     pds_host = pds.replace("https://", "").replace("http://", "").strip("/")
     auth_hdr = {"Authorization": f"Bearer {jwt}"}
 
-    # 1. Build text + UTF-8 byte-accurate link facet (70% Anchor Text / 30% Bare Link)
+    # 1. Build text + UTF-8 byte-accurate link facet (70% Anchor Text [70/30 core vs long-tail] / 30% Diverse Bare Link)
     clean_body = re.sub(r"\s+", " ", (post_text or "")).replace(article_url, "").strip()
+    core_loc = normalize_core_short_name(short_loc) or short_loc
     use_anchor = (random.random() < 0.70)
 
-    if use_anchor and short_loc:
-        if len(clean_body) > 210:
-            clean_body = clean_body[:208].rsplit(" ", 1)[0].rstrip(".,;:") + "."
-        m = re.search(re.escape(short_loc), clean_body, re.I)
+    if use_anchor and core_loc:
+        anchor_phrase = build_seo_anchor_phrase(short_loc)
+        if len(clean_body) > 205:
+            clean_body = clean_body[:203].rsplit(" ", 1)[0].rstrip(".,;:") + "."
+        m = re.search(re.escape(anchor_phrase), clean_body, re.I) or (re.search(re.escape(core_loc), clean_body, re.I) if len(anchor_phrase.split()) <= 4 else None)
         if m:
             full_text = clean_body
             b_start = len(full_text[:m.start()].encode("utf-8"))
             b_end = len(full_text[:m.end()].encode("utf-8"))
         else:
-            lead = f" Xem chi tiết kinh nghiệm khám phá {short_loc}."
+            lead_tails = [
+                f" Tham khảo thêm {anchor_phrase} trước chuyến đi.",
+                f" Xem trọn bộ {anchor_phrase} cho hành trình này.",
+                f" Khám phá chi tiết {anchor_phrase}.",
+            ]
+            lead = random.choice(lead_tails)
             full_text = (clean_body.rstrip(".") + "." + lead).strip()
-            m2 = re.search(re.escape(short_loc), full_text, re.I)
+            m2 = re.search(re.escape(anchor_phrase), full_text, re.I)
             b_start = len(full_text[:m2.start()].encode("utf-8"))
             b_end = len(full_text[:m2.end()].encode("utf-8"))
     else:
-        max_body = max(60, 275 - len(article_url))
+        bare_line = build_diverse_bare_link_line(article_url, short_loc, is_short=True)
+        max_body = max(60, 285 - len(bare_line))
         if len(clean_body) > max_body:
             clean_body = clean_body[:max_body].rsplit(" ", 1)[0].rstrip(".,;:") + "."
-        full_text = f"{clean_body}\nXem chi tiết: {article_url}"
+        full_text = f"{clean_body}\n{bare_line}"
         idx_u = full_text.find(article_url)
         b_start = len(full_text[:idx_u].encode("utf-8"))
         b_end = b_start + len(article_url.encode("utf-8"))
