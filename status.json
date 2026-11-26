@@ -724,6 +724,13 @@
       "duration_sec": 326.1,
       "ready_for_yt": true,
       "published_at": "26/11/2026 00:18"
+    },
+    "video_cache": {
+      "mp4_url": "https://github.com/dulichcheckin/media/releases/download/audio-files/chua-vinh-trang-lich-su-kien-truc-va-kinh-nghiem-di-le-hd-video.mp4",
+      "duration_sec": 137.5,
+      "short_loc": "Chùa Vĩnh Tràng",
+      "bright_v2": true,
+      "cached_at": "27/11/2026 00:30"
     }
   }
 }
