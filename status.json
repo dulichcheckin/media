@@ -765,6 +765,14 @@
       "feed_url": "https://dulichcheckin.github.io/media/spotify.xml",
       "duration_sec": 256.8,
       "published_at": "27/11/2026 07:43"
+    },
+    "dailymotion": {
+      "title": "Chùa Vĩnh Tràng: Kiến trúc giao thoa Á Âu và kinh nghiệm chiêm bái",
+      "mp4_url": "https://github.com/dulichcheckin/media/releases/download/audio-files/chua-vinh-trang-lich-su-kien-truc-va-kinh-nghiem-di-le-hd-video.mp4",
+      "video_url": "https://www.dailymotion.com/video/xc0dyca",
+      "dm_status": "ok",
+      "duration_sec": 137.5,
+      "published_at": "27/11/2026 11:08"
     }
   }
 }
