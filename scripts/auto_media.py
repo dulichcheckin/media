@@ -1523,14 +1523,8 @@ def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: s
     existing_items = [it for it in existing_items if f">{guid}<" not in it]
 
     pub_date = email.utils.format_datetime(datetime.datetime.now(datetime.timezone.utc))
-    if is_spotify:
-        # Spotify: 70% Anchor Text / 30% Bare Link inside semantic HTML (<p>, <a href>) at varied top/mid/bottom position
-        final_desc_cdata = enforce_spotify_html_link(ep_desc, article_url, short_loc)
-        plain_summary = clean_html_text(final_desc_cdata)[:3800]
-    else:
-        # Castbox: 100% standalone Bare Link at varied top/mid/bottom position in plain text
-        final_desc_cdata = enforce_varied_bare_link_plain(ep_desc, article_url, short_loc, max_chars=3800)
-        plain_summary = final_desc_cdata[:3800]
+    # Both Spotify & Castbox use rich semantic HTML (<p>, <a href>) with 70% Anchor Text (70/30 core vs long-tail) & 30% Clickable Bare Link (<a href="url">url</a>)!
+    final_desc_cdata = enforce_spotify_html_link(ep_desc, article_url, short_loc)
 
     new_item = f"""    <item>
       <title>{html.escape(ep_title)}</title>
@@ -1538,11 +1532,11 @@ def update_podcast_rss(channel: str, ep_title: str, ep_desc: str, article_url: s
       <guid isPermaLink="false">{html.escape(guid)}</guid>
       <pubDate>{pub_date}</pubDate>
       <description><![CDATA[{final_desc_cdata}]]></description>
+      <content:encoded><![CDATA[{final_desc_cdata}]]></content:encoded>
       <enclosure url="{html.escape(mp3_url)}" length="{mp3_size}" type="audio/mpeg"/>
       <itunes:image href="{html.escape(item_image_url)}"/>
       <itunes:title>{html.escape(ep_title)}</itunes:title>
       <itunes:author>Du Lịch Checkin</itunes:author>
-      <itunes:summary>{html.escape(plain_summary)}</itunes:summary>
       <itunes:duration>{format_duration_hms(duration_sec)}</itunes:duration>
       <itunes:explicit>false</itunes:explicit>
     </item>"""
